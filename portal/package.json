@@ -1,0 +1,13 @@
+{
+  "name": "devspaces-portal-web",
+  "private": true,
+  "description": "Static assets for the devspaces portal. The Go server embeds web/; only the Tailwind build needs Node.",
+  "scripts": {
+    "build:css": "tailwindcss -c tailwind.config.js -i web/tailwind.src.css -o web/tailwind.css --minify",
+    "watch:css": "tailwindcss -c tailwind.config.js -i web/tailwind.src.css -o web/tailwind.css --watch",
+    "gen:catalog": "node -e \"const c=require('./catalog.default.json');require('fs').writeFileSync('web/catalog.js','/* generated from deploy/platform/catalog.json by build.sh — used only by demo.js when no API is reachable */\\nwindow.DEMO_CATALOG = '+JSON.stringify(c,null,1)+';\\n')\""
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
+  }
+}

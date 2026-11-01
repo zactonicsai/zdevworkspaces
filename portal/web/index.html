@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <title>Developer Workspaces</title>
+  <meta name="description" content="Create and manage your own cloud development workspaces: pick languages and tools, connect with VS Code, keep your files between sessions.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <!-- theme.js runs first so the page never flashes the wrong theme or font size -->
+  <script src="theme.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <!-- tailwind.css is compiled from web/tailwind.src.css + tailwind.config.js (IBM Carbon
+       tokens) with `npm run build:css` and embedded in the Go binary: no CDN, works air-gapped.
+       No inline scripts or styles anywhere: the Content-Security-Policy forbids them. -->
+  <link rel="stylesheet" href="tailwind.css">
+</head>
+<body class="min-h-full flex flex-col bg-white text-gray-100 dark:bg-black dark:text-gray-10 font-sans antialiased">
+  <a href="#main" class="skip-link">Skip to main content</a>
+
+  <header class="sticky top-0 z-40 border-b border-gray-20 dark:border-gray-80 bg-white/95 dark:bg-black/95 backdrop-blur">
+    <div class="page-width flex items-center gap-2 h-14">
+      <button id="nav-toggle" type="button" class="icon-btn md:hidden" aria-label="Open menu" aria-expanded="false" aria-controls="site-nav">
+        <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" stroke-linecap="round"/></svg>
+      </button>
+      <a href="#/home" class="flex items-center gap-2 font-semibold tracking-tight text-gray-100 dark:text-white no-underline">
+        <span class="inline-block w-5 h-5 bg-blue-60" aria-hidden="true"></span>
+        <span>Developer <span class="font-light">Workspaces</span></span>
+      </a>
+      <nav id="site-nav" class="hidden md:flex items-center gap-1 ml-6 text-sm" aria-label="Main">
+        <a href="#/home" data-nav="home" class="nav-link">Home</a>
+        <a href="#/create" data-nav="create" class="nav-link">Create</a>
+        <a href="#/workspaces" data-nav="workspaces" class="nav-link">My workspaces</a>
+        <a href="#/tools" data-nav="tools" class="nav-link">Tools</a>
+        <a href="#/guides" data-nav="guides" class="nav-link">Guides</a>
+        <a href="#/glossary" data-nav="glossary" class="nav-link">Glossary</a>
+        <a href="#/profile" data-nav="profile" class="nav-link">Profile</a>
+      </nav>
+      <div class="ml-auto flex items-center gap-1">
+        <!-- Font size: 14–36 px, applied to the root element so every rem-based size follows -->
+        <div class="flex items-center border border-gray-20 dark:border-gray-80" role="group" aria-label="Text size">
+          <button id="font-dec" type="button" class="icon-btn" aria-label="Make text smaller" title="Smaller text">
+            <span class="text-xs font-semibold">A</span><span class="sr-only">minus</span><span aria-hidden="true" class="text-xs">−</span>
+          </button>
+          <button id="font-reset" type="button" class="px-2 h-9 text-xs tabular-nums font-mono text-gray-70 dark:text-gray-30 hover:bg-gray-10 dark:hover:bg-gray-90" title="Reset text size" aria-label="Current text size, click to reset"><span id="font-size-label">16</span>px</button>
+          <button id="font-inc" type="button" class="icon-btn" aria-label="Make text bigger" title="Bigger text">
+            <span class="text-base font-semibold">A</span><span aria-hidden="true" class="text-xs">+</span>
+          </button>
+        </div>
+        <button id="theme-toggle" type="button" class="icon-btn" aria-label="Switch to dark mode" title="Light / dark">
+          <svg id="icon-moon" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" stroke-linejoin="round"/></svg>
+          <svg id="icon-sun" class="w-5 h-5 hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke-linecap="round"/></svg>
+        </button>
+        <a href="#/profile" id="user-chip" class="hidden sm:inline-flex items-center gap-2 pl-2 pr-3 h-9 text-sm border border-gray-20 dark:border-gray-80 no-underline hover:bg-gray-10 dark:hover:bg-gray-90" title="Your profile">
+          <span class="w-6 h-6 inline-flex items-center justify-center bg-blue-60 text-white text-xs font-semibold" id="user-initial">?</span>
+          <span id="user-name" class="max-w-[10rem] truncate">…</span>
+        </a>
+      </div>
+    </div>
+    <!-- mobile nav -->
+    <nav id="site-nav-mobile" class="md:hidden hidden border-t border-gray-20 dark:border-gray-80" aria-label="Main (mobile)">
+      <div class="page-width grid grid-cols-2 gap-px py-2 text-sm">
+        <a href="#/home" data-nav="home" class="nav-link">Home</a>
+        <a href="#/create" data-nav="create" class="nav-link">Create</a>
+        <a href="#/workspaces" data-nav="workspaces" class="nav-link">My workspaces</a>
+        <a href="#/tools" data-nav="tools" class="nav-link">Tools</a>
+        <a href="#/guides" data-nav="guides" class="nav-link">Guides</a>
+        <a href="#/glossary" data-nav="glossary" class="nav-link">Glossary</a>
+        <a href="#/profile" data-nav="profile" class="nav-link">Profile</a>
+      </div>
+    </nav>
+  </header>
+
+  <div id="banner" class="hidden" role="status"></div>
+
+  <main id="main" class="page-width flex-1 py-6 md:py-10 outline-none" tabindex="-1">
+    <div id="view" aria-live="polite" aria-busy="true">
+      <div class="py-20 text-center text-gray-70 dark:text-gray-30">Loading…</div>
+    </div>
+  </main>
+
+  <footer class="border-t border-gray-20 dark:border-gray-80 text-sm text-gray-70 dark:text-gray-30">
+    <div class="page-width py-6 flex flex-col sm:flex-row gap-3 sm:items-center justify-between">
+      <div>Developer Workspaces · <span id="footer-version"></span> · <button type="button" class="link-btn" data-topic="yaml">How this works</button></div>
+      <div class="flex gap-4">
+        <a href="#/guides/troubleshooting">Help</a>
+        <a href="#/glossary">Glossary</a>
+        <a href="https://code.visualstudio.com/docs/remote/ssh" target="_blank" rel="noopener">VS Code docs ↗</a>
+        <a href="https://kubernetes.io/docs/home/" target="_blank" rel="noopener">Kubernetes docs ↗</a>
+      </div>
+    </div>
+  </footer>
+
+  <!-- One dialog for every popup: glossary terms, confirmations, long help -->
+  <dialog id="modal" class="modal" aria-labelledby="modal-title">
+    <div class="modal-head">
+      <h2 id="modal-title" class="text-lg font-semibold pr-8">Title</h2>
+      <button type="button" class="icon-btn modal-close" data-action="modal-close" aria-label="Close">
+        <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div id="modal-body" class="modal-body prose"></div>
+    <div id="modal-links" class="modal-links"></div>
+    <div id="modal-actions" class="modal-actions"></div>
+  </dialog>
+
+  <div id="toasts" class="fixed bottom-4 right-4 left-4 sm:left-auto z-50 flex flex-col gap-2 pointer-events-none" aria-live="assertive"></div>
+
+  <script src="content.js"></script>
+  <script src="catalog.js"></script>
+  <script src="demo.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

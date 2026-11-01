@@ -1,0 +1,35 @@
+# sshd_config for workspace pods. The entrypoint substitutes __LISTEN__:
+# 127.0.0.1 by default (reachable only through `kubectl exec` → socat, i.e. the
+# cluster's own authn/authz), 0.0.0.0 when the workspace is created with --expose.
+Port 2222
+ListenAddress __LISTEN__
+AddressFamily inet
+HostKey /etc/ssh/ssh_host_ed25519_key
+PidFile none
+LogLevel VERBOSE
+UsePAM no
+
+# Keys only. The first file is the workspace Secret mount, read live: a key added
+# with `workspace ssh-config` on another machine works within a minute, no
+# restart. The second is yours to add extra keys to (it persists on the volume).
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile /etc/workspace/ssh/authorized_keys .ssh/authorized_keys
+PermitRootLogin no
+AllowUsers dev
+
+# What VS Code Remote-SSH needs: TCP forwarding (Ports panel), stream-local
+# forwarding (agent sockets), SFTP for file transfer. Nothing else.
+AllowTcpForwarding yes
+AllowStreamLocalForwarding yes
+AllowAgentForwarding yes
+GatewayPorts no
+PermitTunnel no
+X11Forwarding no
+Subsystem sftp internal-sftp
+
+ClientAliveInterval 30
+ClientAliveCountMax 3
+AcceptEnv LANG LC_* COLORTERM TERM_PROGRAM GIT_AUTHOR_* GIT_COMMITTER_*
+PrintMotd no

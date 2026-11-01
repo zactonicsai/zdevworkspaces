@@ -1,0 +1,271 @@
+# Rendered by:
+#   workspace --catalog deploy/platform/catalog.json create --lang rust --tools cmake,git,gdb --repo git@github.com:acme/engine.git --branch main --git-name 'Alice Example' --git-email alice@example.com \
+#     --namespace ws-alice --dry-run --offline
+# Standard tier: user-namespaced root (hostUsers: false), PSS baseline, loopback sshd reached via kubectl exec.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ws-rust-home
+  namespace: ws-alice
+  labels:
+    devspaces.io/workspace: rust
+    devspaces.io/lang: rust
+    devspaces.io/profile: standard
+    devspaces.io/tier: standard
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+  name: ws-rust-ssh
+  namespace: ws-alice
+  labels:
+    devspaces.io/workspace: rust
+    devspaces.io/lang: rust
+    devspaces.io/profile: standard
+    devspaces.io/tier: standard
+    app.kubernetes.io/managed-by: workspace-cli
+stringData:
+  authorized_keys: |
+    ssh-ed25519 AAAA...redacted... workspace:ws-alice/rust
+  ssh_host_ed25519_key: |
+    <generated per workspace at create time; stored only in this Secret>
+  ssh_host_ed25519_key.pub: |
+    ssh-ed25519 AAAA...redacted... dry-run
+---
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+  name: ws-rust-git
+  namespace: ws-alice
+  labels:
+    devspaces.io/workspace: rust
+    devspaces.io/lang: rust
+    devspaces.io/profile: standard
+    devspaces.io/tier: standard
+    app.kubernetes.io/managed-by: workspace-cli
+stringData:
+  ssh_key: |
+    <deploy key generated per workspace at create time; add the public half to your git host>
+  ssh_key.pub: "ssh-ed25519 AAAA...redacted... workspace:ws-alice/ws-rust"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ws-rust
+  namespace: ws-alice
+  labels:
+    devspaces.io/workspace: rust
+    devspaces.io/lang: rust
+    devspaces.io/profile: standard
+    devspaces.io/tier: standard
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  clusterIP: None
+  selector:
+    devspaces.io/workspace: rust
+  ports:
+  - name: ssh
+    port: 2222
+    targetPort: ssh
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ws-rust
+  namespace: ws-alice
+  labels:
+    devspaces.io/workspace: rust
+    devspaces.io/lang: rust
+    devspaces.io/profile: standard
+    devspaces.io/tier: standard
+    app.kubernetes.io/managed-by: workspace-cli
+  annotations:
+    devspaces.io/idle-timeout: 4h
+    devspaces.io/spec: "{\"branch\": \"main\", \"caps\": [], \"cpu\": \"4\", \"cpuRequest\": \"1\", \"createdAt\": \"2026-10-31T00:00:00Z\", \"devices\": {}, \"dotfiles\": \"\", \"ephemeralStorage\": \"20Gi\", \"expose\": false, \"gitAuth\": \"ssh\", \"gitEmail\": \"alice@example.com\", \"gitName\": \"Alice Example\", \"hostPaths\": [], \"idleTimeout\": \"4h\", \"image\": \"artifactory.example.com/devspaces-docker/workspace-rust:2026.10\", \"isolation\": \"userns\", \"lang\": \"rust\", \"languages\": [\"rust\"], \"memory\": \"8Gi\", \"memoryRequest\": \"2Gi\", \"multicast\": false, \"profile\": \"standard\", \"repo\": \"git@github.com:acme/engine.git\", \"size\": \"30Gi\", \"storageClass\": \"\", \"tools\": [\"cmake\", \"git\", \"gdb\"], \"tz\": \"\"}"
+spec:
+  serviceName: ws-rust
+  replicas: 1
+  selector:
+    matchLabels:
+      devspaces.io/workspace: rust
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        devspaces.io/workspace: rust
+        devspaces.io/lang: rust
+        devspaces.io/profile: standard
+        devspaces.io/tier: standard
+        app.kubernetes.io/managed-by: workspace-cli
+    spec:
+      serviceAccountName: workspace
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+        sysctls:
+        - name: net.ipv4.ping_group_range
+          value: "0 2147483647"
+        - name: net.ipv4.ip_unprivileged_port_start
+          value: "0"
+      containers:
+      - name: workspace
+        image: "artifactory.example.com/devspaces-docker/workspace-rust:2026.10"
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: WORKSPACE_NAME
+          value: rust
+        - name: WORKSPACE_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: WORKSPACE_LANG
+          value: rust
+        - name: WORKSPACE_LANGUAGES
+          value: rust
+        - name: WORKSPACE_TOOLS
+          value: "cmake,git,gdb"
+        - name: WORKSPACE_ARTIFACTS
+          value: "[]"
+        - name: WORKSPACE_PROFILE
+          value: standard
+        - name: WORKSPACE_REPO
+          value: "git@github.com:acme/engine.git"
+        - name: WORKSPACE_REPO_DIR
+          value: engine
+        - name: WORKSPACE_BRANCH
+          value: main
+        - name: WORKSPACE_DOTFILES
+          value: ""
+        - name: GIT_AUTH_MODE
+          value: ssh
+        - name: GIT_HOST
+          value: github.com
+        - name: GIT_USER_NAME
+          value: "Alice Example"
+        - name: GIT_USER_EMAIL
+          value: alice@example.com
+        - name: WORKSPACE_SSH_LISTEN
+          value: 127.0.0.1
+        - name: WORKSPACE_MCAST_IFACE
+          value: ""
+        - name: TZ
+          value: UTC
+        - name: ARTIFACTORY_URL
+          value: "https://artifactory.example.com/artifactory"
+        - name: ARTIFACTORY_REPOS
+          value: "{\"apt\":\"ubuntu-remote\",\"cargo\":\"cargo-remote\",\"docker\":\"devspaces-docker\",\"generic\":\"devspaces-generic\",\"github\":\"github-remote\",\"go\":\"go-remote\",\"maven\":\"maven-remote\",\"npm\":\"npm-remote\",\"pypi\":\"pypi-remote\"}"
+        - name: ARTIFACTORY_MIRRORS
+          value: "{}"
+        - name: ARTIFACTORY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: workspace-profile
+              key: artifactory_token
+              optional: true
+        - name: ARTIFACTORY_USER
+          valueFrom:
+            secretKeyRef:
+              name: workspace-profile
+              key: artifactory_user
+              optional: true
+        ports:
+        - name: ssh
+          containerPort: 2222
+          protocol: TCP
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+            ephemeral-storage: 20Gi
+          limits:
+            cpu: "4"
+            memory: 8Gi
+            ephemeral-storage: 20Gi
+        securityContext:
+          runAsUser: 0
+          allowPrivilegeEscalation: true
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - AUDIT_WRITE
+            - CHOWN
+            - DAC_OVERRIDE
+            - FOWNER
+            - FSETID
+            - KILL
+            - MKNOD
+            - NET_BIND_SERVICE
+            - SETFCAP
+            - SETGID
+            - SETPCAP
+            - SETUID
+            - SYS_CHROOT
+        volumeMounts:
+        - name: home
+          mountPath: /home/dev
+        - name: ssh
+          mountPath: /etc/workspace/ssh
+          readOnly: true
+        - name: features-extra
+          mountPath: /opt/workspace/features.d
+          readOnly: true
+        - name: git
+          mountPath: /etc/workspace/git
+          readOnly: true
+        readinessProbe:
+          exec:
+            command:
+            - bash
+            - "-c"
+            - "exec 3<>/dev/tcp/127.0.0.1/2222"
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          exec:
+            command:
+            - bash
+            - "-c"
+            - "exec 3<>/dev/tcp/127.0.0.1/2222"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          failureThreshold: 5
+      volumes:
+      - name: home
+        persistentVolumeClaim:
+          claimName: ws-rust-home
+      - name: ssh
+        secret:
+          secretName: ws-rust-ssh
+          defaultMode: 288
+      - name: features-extra
+        configMap:
+          name: workspace-features
+          optional: true
+          defaultMode: 493
+      - name: git
+        secret:
+          secretName: ws-rust-git
+          defaultMode: 288
+      hostUsers: false
+      imagePullSecrets:
+      - name: artifactory-pull

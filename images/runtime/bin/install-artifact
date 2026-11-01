@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# install-artifact JSON — install one catalog tool that comes from Artifactory
+# instead of a scripted feature. Called by the entrypoint for every entry in
+# $WORKSPACE_ARTIFACTS (a JSON array the CLI/portal builds from catalog.json):
+#
+#   {"name":"ripgrep","url":"https://af.example/artifactory/github-remote/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz",
+#    "install":"tar","strip":1,"bin":["rg"],"sha256":"…optional…"}
+#
+# install types:  tar | zip  → extract under /opt/tools/<name>, symlink `bin` entries into /usr/local/bin
+#                 binary     → copy to /usr/local/bin/<bin[0]>
+#                 deb        → dpkg -i (apt-get -f install for deps)
+#                 script     → run with sh (e.g. a vendor installer)
+# Idempotent: re-running with the same URL is a no-op (marker in /var/lib/workspace/artifacts).
+set -Eeuo pipefail
+spec=${1:?usage: install-artifact '<json>'}
+j() { printf '%s' "$spec" | jq -r "$1"; }
+name=$(j '.name'); url=$(j '.url'); kind=$(j '.install // "tar"'); strip=$(j '.strip // 0'); sha=$(j '.sha256 // empty')
+mapfile -t bins < <(printf '%s' "$spec" | jq -r '.bin // [] | .[]')
+[ -n "$name" ] && [ -n "$url" ] || { echo "install-artifact: name and url are required" >&2; exit 2; }
+# Architecture placeholders are resolved on the node that runs the pod, so one catalog entry serves amd64 and arm64.
+url=${url//\{arch\}/$(uname -m)}                      # x86_64 | aarch64
+url=${url//\{goarch\}/$(dpkg --print-architecture)}   # amd64  | arm64
+
+STATE=/var/lib/workspace/artifacts; mkdir -p "$STATE" /opt/tools
+if [ -f "$STATE/$name.url" ] && [ "$(cat "$STATE/$name.url")" = "$url" ]; then
+  echo "install-artifact: $name already installed from $url"; exit 0
+fi
+
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+file="$work/${url##*/}"
+auth=()
+if [ -n "${ARTIFACTORY_TOKEN:-}" ] && [[ "$url" == "${ARTIFACTORY_URL:-__none__}"* ]]; then
+  auth=(-H "Authorization: Bearer $ARTIFACTORY_TOKEN")
+fi
+echo "install-artifact: downloading $url"
+curl -fsSL --retry 3 --retry-delay 2 "${auth[@]}" -o "$file" "$url"
+if [ -n "$sha" ]; then echo "$sha  $file" | sha256sum -c - >/dev/null; fi
+
+dest="/opt/tools/$name"
+case "$kind" in
+  tar)
+    rm -rf "$dest"; mkdir -p "$dest"
+    tar -xf "$file" -C "$dest" --strip-components="$strip"
+    ;;
+  zip)
+    rm -rf "$dest"; mkdir -p "$dest"
+    unzip -q -o "$file" -d "$dest"
+    ;;
+  binary)
+    install -m 755 "$file" "/usr/local/bin/${bins[0]:-$name}"
+    ;;
+  deb)
+    dpkg -i "$file" || apt-get install -y -qq -f
+    ;;
+  script)
+    sh "$file"
+    ;;
+  *) echo "install-artifact: unknown install type '$kind'" >&2; exit 2 ;;
+esac
+
+if [ "$kind" = tar ] || [ "$kind" = zip ]; then
+  for b in "${bins[@]}"; do
+    src=$(find "$dest" -path "*/$b" -type f | head -1 || true)
+    [ -n "$src" ] || src=$(find "$dest" -name "$(basename "$b")" -type f | head -1 || true)
+    if [ -n "$src" ]; then chmod 755 "$src"; ln -sf "$src" "/usr/local/bin/$(basename "$b")"; echo "install-artifact: $(basename "$b") -> $src"
+    else echo "install-artifact: warning: binary '$b' not found in archive" >&2; fi
+  done
+fi
+printf '%s' "$url" >"$STATE/$name.url"
+echo "install-artifact: $name done"

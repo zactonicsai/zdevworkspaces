@@ -1,0 +1,1234 @@
+#!/usr/bin/env python3
+"""
+workspace — on-demand Kubernetes developer workspaces.
+
+Single-file CLI, Python 3.9+, standard library only. Every cluster operation
+goes through `kubectl`, so your kubeconfig, contexts, auth plugins and RBAC
+apply exactly as they do on the command line.
+
+  workspace create --lang rust --tools cmake,git
+  workspace ssh rust                  # or in VS Code: Remote-SSH → "ws-rust"
+  workspace code rust                 # opens VS Code on /workspace
+  workspace stop rust                 # pod removed, home volume kept
+  workspace start rust                # also happens automatically on ssh
+  workspace delete rust --purge       # also deletes the volume
+
+Platform admins:
+  workspace admin onboard alice --lab                # per-developer namespaces
+  workspace admin reap --all-namespaces              # what the reaper CronJob runs
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import datetime as dt
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from urllib.parse import urlparse
+
+VERSION = "1.0.0"
+
+SYSTEM_NS = os.environ.get("WORKSPACE_SYSTEM_NAMESPACE", "devspaces-system")
+CATALOG_CM = "workspace-catalog"
+CONFIG_DIR = Path(os.environ.get("WORKSPACE_CONFIG_DIR", str(Path.home() / ".config" / "workspace")))
+CONFIG_FILE = CONFIG_DIR / "config.json"
+KEYS_DIR = CONFIG_DIR / "keys"
+KNOWN_HOSTS = CONFIG_DIR / "known_hosts"
+SSH_CONFIG = Path.home() / ".ssh" / "config"
+
+LABEL_WS = "devspaces.io/workspace"
+LABEL_LANG = "devspaces.io/lang"
+LABEL_PROFILE = "devspaces.io/profile"
+LABEL_TIER = "devspaces.io/tier"
+LABEL_TENANT = "devspaces.io/tenant"
+LABEL_MANAGED = "app.kubernetes.io/managed-by"
+ANN_IDLE = "devspaces.io/idle-timeout"
+ANN_ACTIVE = "devspaces.io/last-active"
+ANN_SPEC = "devspaces.io/spec"
+ANN_NETWORKS = "k8s.v1.cni.cncf.io/networks"
+
+SSH_PORT = 2222
+DEV_USER = "dev"
+DEV_GID = 1000
+NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,38}[a-z0-9])?$")
+NO_NS = object()  # sentinel: run kubectl without -n
+
+# Mirrors deploy/platform/catalog.json. The cluster copy always wins; this is
+# only used when the ConfigMap cannot be read (first install, no RBAC yet).
+DEFAULT_CATALOG = {
+    "registry": "ghcr.io/example/devspaces",
+    "tag": "2026.10",
+    "pullSecret": "",
+    "defaults": {"profile": "standard", "isolation": "userns", "cpu": "4", "memory": "8Gi",
+                 "cpuRequest": "1", "memoryRequest": "2Gi", "ephemeralStorage": "20Gi",
+                 "size": "30Gi", "storageClass": "", "idleTimeout": "4h"},
+    "languages": {l: {"image": f"workspace-{l}"} for l in ("base", "python", "go", "rust", "java", "node", "cpp")},
+    "tools": {t: {} for t in ("git", "cmake", "gdb", "docker-cli", "kubectl", "protobuf", "mcast",
+                              "python", "go", "rust", "node", "java", "cpp")},
+    "profiles": {
+        "standard": {"tier": "standard",
+                     "capabilities": ["AUDIT_WRITE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "MKNOD",
+                                      "NET_BIND_SERVICE", "SETFCAP", "SETGID", "SETPCAP", "SETUID", "SYS_CHROOT"]},
+        "hardware": {"tier": "lab", "privileged": True, "isolation": "none",
+                     "hostPaths": ["/lib/modules", "/usr/src", "/lib/firmware"],
+                     "nodeSelector": {"devspaces.io/lab": "true"},
+                     "tolerations": [{"key": "devspaces.io/lab", "operator": "Equal", "value": "true", "effect": "NoSchedule"}],
+                     "exclusiveNode": True},
+        "kernel": {"tier": "lab", "isolation": "kata",
+                   "capabilities": ["AUDIT_WRITE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "MKNOD", "NET_ADMIN",
+                                    "NET_BIND_SERVICE", "NET_RAW", "SETFCAP", "SETGID", "SETPCAP", "SETUID", "SYS_ADMIN",
+                                    "SYS_CHROOT", "SYS_MODULE", "SYS_PTRACE", "SYS_RAWIO", "IPC_LOCK"],
+                   "nodeSelector": {"devspaces.io/lab": "true"},
+                   "tolerations": [{"key": "devspaces.io/lab", "operator": "Equal", "value": "true", "effect": "NoSchedule"}]},
+    },
+    "isolation": {"userns": {"hostUsers": False}, "gvisor": {"runtimeClass": "gvisor"},
+                  "kata": {"runtimeClass": "kata"}, "none": {}},
+    "networking": {"clusterCIDRs": ["10.244.0.0/16", "10.96.0.0/12"],
+                   "blockedEgress": ["169.254.169.254/32"],
+                   "multicast": {"nad": "devspaces-system/mcast", "iface": "net1"}},
+}
+
+
+# --------------------------------------------------------------------------- utils
+class CliError(Exception):
+    pass
+
+
+def info(msg: str) -> None:
+    print(f"workspace: {msg}", file=sys.stderr)
+
+
+def warn(msg: str) -> None:
+    print(f"workspace: warning: {msg}", file=sys.stderr)
+
+
+def utcnow() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def parse_ts(s: str) -> dt.datetime:
+    return dt.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+
+
+def parse_duration(s: str) -> int:
+    """'4h', '90m', '1d12h', '0'/'off' → seconds."""
+    s = (s or "").strip().lower()
+    if s in ("", "0", "off", "none", "never"):
+        return 0
+    m = re.fullmatch(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", s)
+    if not m or not any(m.groups()):
+        raise CliError(f"bad duration {s!r} (examples: 30m, 4h, 1d12h, off)")
+    d, h, mi, sec = (int(x or 0) for x in m.groups())
+    return ((d * 24 + h) * 60 + mi) * 60 + sec
+
+
+def human_duration(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+    return f"{seconds // 86400}d{(seconds % 86400) // 3600}h"
+
+
+def b64d(s: str) -> str:
+    return base64.b64decode(s).decode()
+
+
+def sanitize_user(u: str) -> str:
+    u = u.lower().split("@")[0]
+    u = re.sub(r"[^a-z0-9-]+", "-", u).strip("-")
+    return u[:40] or "dev"
+
+
+def tenant_namespace(user: str, tier: str) -> str:
+    return f"ws-{user}" + ("-lab" if tier == "lab" else "")
+
+
+def git_host(url: str) -> str:
+    if not url:
+        return ""
+    m = re.match(r"^(?:[\w.-]+@)?([\w.-]+):", url)
+    if m and "://" not in url:  # scp-like: git@github.com:org/repo.git
+        return m.group(1)
+    return urlparse(url).hostname or ""
+
+
+def repo_dirname(url: str) -> str:
+    tail = re.sub(r"\.git/?$", "", url.rstrip("/")).rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    return re.sub(r"[^A-Za-z0-9._-]", "-", tail) or "repo"
+
+
+def artifact_specs(cat: dict, tools: list[str]) -> list[dict]:
+    """Catalog tools with an `artifact` block → JSON specs for /opt/workspace/bin/install-artifact.
+    {arch}/{goarch} are left for the pod to fill in; {version} is resolved here."""
+    af = cat.get("artifactory") or {}
+    base, repos = (af.get("url") or "").rstrip("/"), af.get("repos") or {}
+    out = []
+    for t in tools:
+        a = (cat["tools"].get(t) or {}).get("artifact")
+        if not a:
+            continue
+        repo = repos.get(a.get("repo", "generic"), a.get("repo", "generic"))
+        path = a["path"].replace("{version}", str(a.get("version", "")))
+        url = a["url"] if a.get("url") else f"{base}/{repo}/{path}"
+        spec = {"name": t, "url": url, "install": a.get("install", "tar"), "bin": a.get("bin", [t])}
+        for k in ("strip", "sha256"):
+            if a.get(k) is not None:
+                spec[k] = a[k]
+        out.append(spec)
+    return out
+
+
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def sh(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, text=True, capture_output=True, check=True, **kw)
+
+
+# ----------------------------------------------------------------- yaml (dry-run)
+_PLAIN = re.compile(r"[A-Za-z0-9_./][A-Za-z0-9_./+=@-]*")
+_RESERVED = {"true", "false", "null", "yes", "no", "on", "off", "~", "y", "n"}
+_NUMBER = re.compile(r"[-+]?(\d[\d_]*\.?\d*|\.\d+)([eE][-+]?\d+)?|0x[0-9a-fA-F]+|0o[0-7]+")
+
+
+def _scalar(v) -> str:
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = str(v)
+    if s and _PLAIN.fullmatch(s) and s.lower() not in _RESERVED and not _NUMBER.fullmatch(s) and ":" not in s:
+        return s
+    return json.dumps(s)
+
+
+def to_yaml(obj, indent: int = 0) -> list[str]:
+    """Minimal YAML emitter for JSON-like data (dry-run output only)."""
+    pad = " " * indent
+    out: list[str] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            key = _scalar(str(k))
+            if isinstance(v, dict) and v:
+                out.append(f"{pad}{key}:")
+                out += to_yaml(v, indent + 2)
+            elif isinstance(v, list) and v:
+                out.append(f"{pad}{key}:")
+                out += to_yaml(v, indent)
+            elif isinstance(v, str) and "\n" in v:
+                body = v.rstrip("\n")
+                out.append(f"{pad}{key}: |" + ("" if v.endswith("\n") else "-"))
+                out += [f"{pad}  {line}" for line in body.split("\n")]
+            elif isinstance(v, dict):
+                out.append(f"{pad}{key}: {{}}")
+            elif isinstance(v, list):
+                out.append(f"{pad}{key}: []")
+            else:
+                out.append(f"{pad}{key}: {_scalar(v)}")
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, dict) and item:
+                sub = to_yaml(item, indent + 2)
+                out.append(f"{pad}- {sub[0][indent + 2:]}")
+                out += sub[1:]
+            elif isinstance(item, (dict, list)):
+                out.append(f"{pad}- {json.dumps(item)}")
+            else:
+                out.append(f"{pad}- {_scalar(item)}")
+    else:
+        out.append(f"{pad}{_scalar(obj)}")
+    return out
+
+
+def dump_objects(objs: list[dict]) -> str:
+    return "\n".join("---\n" + "\n".join(to_yaml(o)) for o in objs) + "\n"
+
+
+# ------------------------------------------------------------------------ kubectl
+class Kube:
+    def __init__(self, context: str | None = None, namespace: str | None = None, offline: bool = False):
+        self.offline = offline  # --offline: render manifests without touching a cluster (GitOps, CI, no kubectl)
+        if not offline and not shutil.which("kubectl"):
+            raise CliError("kubectl not found in PATH")
+        self.context = context
+        self.namespace = namespace
+
+    def cmd(self, args: list[str], ns=None) -> list[str]:
+        c = ["kubectl"]
+        if self.context:
+            c += ["--context", self.context]
+        if ns is None:
+            ns = self.namespace
+        if ns is not NO_NS and ns:
+            c += ["-n", ns]
+        return c + list(args)
+
+    def run(self, args: list[str], ns=None, input: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
+        if self.offline:
+            raise CliError(f"--offline: refusing to run kubectl {' '.join(args)}")
+        res = subprocess.run(self.cmd(args, ns), input=input, text=True, capture_output=True)
+        if check and res.returncode != 0:
+            raise CliError(f"kubectl {' '.join(args)}: {(res.stderr or res.stdout).strip()}")
+        return res
+
+    def get(self, kind: str, name: str | None = None, ns=None, selector: str | None = None,
+            extra: list[str] | None = None):
+        if self.offline:
+            return None
+        args = ["get", kind] + ([name] if name else []) + (["-l", selector] if selector else []) + (extra or [])
+        res = self.run(args + ["-o", "json"], ns=ns, check=False)
+        if res.returncode != 0:
+            if "not found" in res.stderr or "NotFound" in res.stderr:
+                return None
+            raise CliError(f"kubectl get {kind} {name or ''}: {res.stderr.strip()}")
+        return json.loads(res.stdout)
+
+    def apply(self, objects: list[dict]) -> str:
+        doc = json.dumps({"apiVersion": "v1", "kind": "List", "items": objects})
+        return self.run(["apply", "-f", "-"], ns=NO_NS, input=doc).stdout
+
+    def whoami(self) -> str | None:
+        if self.offline:
+            return None
+        res = self.run(["auth", "whoami", "-o", "json"], ns=NO_NS, check=False)
+        if res.returncode != 0:
+            return None
+        return json.loads(res.stdout).get("status", {}).get("userInfo", {}).get("username")
+
+
+CATALOG_FILE: str | None = None  # --catalog FILE: render from a local catalog (GitOps, CI, --offline)
+
+
+def load_catalog(k: Kube) -> dict:
+    if CATALOG_FILE:
+        try:
+            return {**DEFAULT_CATALOG, **json.loads(Path(CATALOG_FILE).read_text())}
+        except (OSError, json.JSONDecodeError) as e:
+            raise CliError(f"cannot read --catalog {CATALOG_FILE}: {e}")
+    cm = k.get("configmap", CATALOG_CM, ns=SYSTEM_NS)
+    data = (cm or {}).get("data", {}).get("catalog.json")
+    if data:
+        try:
+            cat = json.loads(data)
+            return {**DEFAULT_CATALOG, **cat}
+        except json.JSONDecodeError as e:
+            warn(f"cluster catalog is not valid JSON ({e}); using built-in defaults")
+    else:
+        warn(f"cannot read configmap {SYSTEM_NS}/{CATALOG_CM}; using built-in catalog")
+    return DEFAULT_CATALOG
+
+
+def resolve_namespace(args, k: Kube, tier: str = "standard") -> str:
+    if getattr(args, "namespace", None):
+        return args.namespace
+    if os.environ.get("WORKSPACE_NAMESPACE"):
+        return os.environ["WORKSPACE_NAMESPACE"]
+    user = load_config().get("user")
+    if not user:
+        who = k.whoami()
+        if not who:
+            raise CliError("cannot determine your username (needs kubectl >= 1.28): pass --namespace, "
+                           "set WORKSPACE_NAMESPACE, or put {\"user\": \"alice\"} in " + str(CONFIG_FILE))
+        user = sanitize_user(who)
+    return tenant_namespace(user, tier)
+
+
+# --------------------------------------------------------------------------- keys
+def ensure_client_key(ns: str, name: str) -> tuple[Path, str]:
+    KEYS_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(CONFIG_DIR, 0o700)
+    os.chmod(KEYS_DIR, 0o700)
+    key = KEYS_DIR / f"{ns}--{name}"
+    if not key.exists():
+        if not shutil.which("ssh-keygen"):
+            raise CliError("ssh-keygen not found (install OpenSSH client)")
+        sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"workspace:{ns}/{name}", "-f", str(key)])
+        info(f"generated SSH key {key}")
+    os.chmod(key, 0o600)
+    return key, key.with_suffix(".pub").read_text().strip()
+
+
+def generate_keypair(comment: str) -> tuple[str, str]:
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "key"
+        sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", comment, "-f", str(p)])
+        return p.read_text(), p.with_suffix(".pub").read_text().strip()
+
+
+def host_keypair(k: Kube, ns: str, obj: str, rotate: bool) -> tuple[str, str]:
+    """Stable host key per workspace: reuse the Secret if it exists so VS Code never sees a changed key."""
+    if not rotate:
+        existing = k.get("secret", f"{obj}-ssh", ns=ns)
+        data = (existing or {}).get("data", {})
+        if data.get("ssh_host_ed25519_key") and data.get("ssh_host_ed25519_key.pub"):
+            return b64d(data["ssh_host_ed25519_key"]), b64d(data["ssh_host_ed25519_key.pub"]).strip()
+    return generate_keypair(f"host:{ns}/{obj}")
+
+
+def resolve_git_auth(args, k: Kube, ns: str, obj: str) -> tuple[str, dict | None, str | None]:
+    """→ (mode, secret stringData or None if the existing Secret is kept, public key to show)."""
+    mode = args.git_auth
+    if args.git_key:
+        mode = "ssh"
+    elif args.git_token_stdin or os.environ.get("WORKSPACE_GIT_TOKEN"):
+        mode = "token"
+    if mode == "none":
+        return "none", {}, None
+    if mode == "ssh":
+        key = Path(args.git_key).expanduser()
+        if not key.exists():
+            raise CliError(f"--git-key {key} not found")
+        return "ssh", {"ssh_key": key.read_text()}, None
+    if mode == "token":
+        token = sys.stdin.read().strip() if args.git_token_stdin else os.environ.get("WORKSPACE_GIT_TOKEN", "")
+        if not token:
+            raise CliError("no token: pipe it via --git-token-stdin or set WORKSPACE_GIT_TOKEN")
+        return "token", {"token": token, "username": args.git_token_user}, None
+    # mode == "deploy-key": a key that only this workspace holds; add it to the repo / your git account.
+    existing = k.get("secret", f"{obj}-git", ns=ns) if not args.rotate_git_key else None
+    data = (existing or {}).get("data", {})
+    if data.get("ssh_key.pub"):
+        return "ssh", None, b64d(data["ssh_key.pub"]).strip()
+    priv, pub = generate_keypair(f"workspace:{ns}/{obj}")
+    return "ssh", {"ssh_key": priv, "ssh_key.pub": pub}, pub
+
+
+# -------------------------------------------------------------- ssh client config
+def ssh_alias(name: str) -> str:
+    return f"ws-{name}"
+
+
+def replace_block(path: Path, start: str, end: str, block: str | None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = path.read_text() if path.exists() else ""
+    pattern = re.compile(rf"(?ms)^{re.escape(start)}.*?^{re.escape(end)}\n?")
+    text = pattern.sub("", text)
+    if block:
+        text = (text.rstrip("\n") + "\n\n" if text.strip() else "") + block
+    path.write_text(text)
+    os.chmod(path, 0o600)
+
+
+def write_ssh_config(ns: str, name: str, key_path: Path, context: str | None, forward_agent: bool) -> str:
+    alias = ssh_alias(name)
+    script = shutil.which("workspace") or os.path.abspath(sys.argv[0])
+    proxy = [sys.executable, script, "--namespace", ns] + (["--context", context] if context else []) + ["proxy", name]
+    start, end = f"# >>> workspace {ns}/{name} >>>", f"# <<< workspace {ns}/{name} <<<"
+    block = "\n".join([
+        start + "  (managed by `workspace`; edits here are overwritten)",
+        f"Host {alias}",
+        f"    User {DEV_USER}",
+        f"    HostName {alias}",
+        f"    HostKeyAlias {alias}",
+        f"    ProxyCommand {' '.join(shlex.quote(p) for p in proxy)}",
+        f"    IdentityFile {key_path}",
+        "    IdentitiesOnly yes",
+        f"    UserKnownHostsFile {KNOWN_HOSTS}",
+        "    StrictHostKeyChecking yes",
+        "    ConnectTimeout 240",
+        "    ServerAliveInterval 30",
+        "    ServerAliveCountMax 4",
+        f"    ForwardAgent {'yes' if forward_agent else 'no'}",
+        end,
+        "",
+    ])
+    replace_block(SSH_CONFIG, start, end, block)
+    return alias
+
+
+def remove_ssh_config(ns: str, name: str) -> None:
+    if SSH_CONFIG.exists():
+        replace_block(SSH_CONFIG, f"# >>> workspace {ns}/{name} >>>", f"# <<< workspace {ns}/{name} <<<", None)
+
+
+def write_known_host(alias: str, hostkey_pub: str | None) -> None:
+    KNOWN_HOSTS.parent.mkdir(parents=True, exist_ok=True)
+    lines = [l for l in (KNOWN_HOSTS.read_text().splitlines() if KNOWN_HOSTS.exists() else [])
+             if not l.startswith(alias + " ")]
+    if hostkey_pub:
+        parts = hostkey_pub.split()
+        lines.append(f"{alias} {parts[0]} {parts[1]}")
+    KNOWN_HOSTS.write_text("\n".join(lines) + ("\n" if lines else ""))
+    os.chmod(KNOWN_HOSTS, 0o600)
+
+
+# ------------------------------------------------------------------- rendering
+def render_workspace(ns: str, name: str, spec: dict, cat: dict, profile: dict,
+                     client_pub: str, hostkey: tuple[str, str], git_secret: dict | None) -> list[dict]:
+    obj = ssh_alias(name)  # k8s object name: ws-<name>; pod: ws-<name>-0
+    tier = profile.get("tier", "standard")
+    labels = {LABEL_WS: name, LABEL_LANG: spec["lang"], LABEL_PROFILE: spec["profile"],
+              LABEL_TIER: tier, LABEL_MANAGED: "workspace-cli"}
+    sel = {LABEL_WS: name}
+    objs: list[dict] = []
+
+    pvc = {"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+           "metadata": {"name": f"{obj}-home", "namespace": ns, "labels": labels},
+           "spec": {"accessModes": ["ReadWriteOnce"],
+                    "resources": {"requests": {"storage": spec["size"]}}}}
+    if spec.get("storageClass"):
+        pvc["spec"]["storageClassName"] = spec["storageClass"]
+    objs.append(pvc)
+
+    objs.append({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                 "metadata": {"name": f"{obj}-ssh", "namespace": ns, "labels": labels},
+                 "stringData": {"authorized_keys": client_pub + "\n",
+                                "ssh_host_ed25519_key": hostkey[0],
+                                "ssh_host_ed25519_key.pub": hostkey[1] + "\n"}})
+    if git_secret:
+        objs.append({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                     "metadata": {"name": f"{obj}-git", "namespace": ns, "labels": labels},
+                     "stringData": git_secret})
+
+    objs.append({"apiVersion": "v1", "kind": "Service",
+                 "metadata": {"name": obj, "namespace": ns, "labels": labels},
+                 "spec": {"clusterIP": "None", "selector": sel,
+                          "ports": [{"name": "ssh", "port": SSH_PORT, "targetPort": "ssh"}]}})
+
+    af = cat.get("artifactory") or {}
+    artifacts = artifact_specs(cat, spec["tools"])
+    # The pod fills in the architecture placeholders itself; keep them literal here.
+    env = [
+        {"name": "WORKSPACE_NAME", "value": name},
+        {"name": "WORKSPACE_NAMESPACE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}},
+        {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
+        {"name": "WORKSPACE_LANG", "value": spec["lang"]},
+        {"name": "WORKSPACE_LANGUAGES", "value": ",".join(spec.get("languages") or [spec["lang"]])},
+        {"name": "WORKSPACE_TOOLS", "value": ",".join(spec["tools"])},
+        {"name": "WORKSPACE_ARTIFACTS", "value": json.dumps(artifacts, separators=(",", ":"), sort_keys=True)},
+        {"name": "WORKSPACE_PROFILE", "value": spec["profile"]},
+        {"name": "WORKSPACE_REPO", "value": spec.get("repo") or ""},
+        {"name": "WORKSPACE_REPO_DIR", "value": repo_dirname(spec["repo"]) if spec.get("repo") else ""},
+        {"name": "WORKSPACE_BRANCH", "value": spec.get("branch") or ""},
+        {"name": "WORKSPACE_DOTFILES", "value": spec.get("dotfiles") or ""},
+        {"name": "GIT_AUTH_MODE", "value": spec["gitAuth"]},
+        {"name": "GIT_HOST", "value": git_host(spec.get("repo") or "")},
+        {"name": "GIT_USER_NAME", "value": spec.get("gitName") or ""},
+        {"name": "GIT_USER_EMAIL", "value": spec.get("gitEmail") or ""},
+        {"name": "WORKSPACE_SSH_LISTEN", "value": "0.0.0.0" if spec.get("expose") else "127.0.0.1"},
+        {"name": "WORKSPACE_MCAST_IFACE", "value": cat["networking"]["multicast"]["iface"] if spec.get("multicast") else ""},
+        {"name": "TZ", "value": spec.get("tz") or "UTC"},
+    ]
+    if af.get("url"):
+        env += [
+            {"name": "ARTIFACTORY_URL", "value": af["url"].rstrip("/")},
+            {"name": "ARTIFACTORY_REPOS", "value": json.dumps(af.get("repos") or {}, separators=(",", ":"), sort_keys=True)},
+            {"name": "ARTIFACTORY_MIRRORS", "value": json.dumps(af.get("mirrors") or {}, separators=(",", ":"), sort_keys=True)},
+            # Optional per-developer token: Secret workspace-profile/artifactory_token (portal "Profile" page
+            # or `kubectl create secret generic workspace-profile --from-literal=artifactory_token=…`).
+            {"name": "ARTIFACTORY_TOKEN", "valueFrom": {"secretKeyRef": {"name": "workspace-profile", "key": "artifactory_token", "optional": True}}},
+            {"name": "ARTIFACTORY_USER", "valueFrom": {"secretKeyRef": {"name": "workspace-profile", "key": "artifactory_user", "optional": True}}},
+        ]
+
+    volumes = [
+        {"name": "home", "persistentVolumeClaim": {"claimName": f"{obj}-home"}},
+        {"name": "ssh", "secret": {"secretName": f"{obj}-ssh", "defaultMode": 0o440}},
+        {"name": "features-extra", "configMap": {"name": "workspace-features", "optional": True, "defaultMode": 0o755}},
+    ]
+    mounts = [
+        {"name": "home", "mountPath": "/home/dev"},
+        {"name": "ssh", "mountPath": "/etc/workspace/ssh", "readOnly": True},
+        {"name": "features-extra", "mountPath": "/opt/workspace/features.d", "readOnly": True},
+    ]
+    if spec["gitAuth"] != "none":
+        volumes.append({"name": "git", "secret": {"secretName": f"{obj}-git", "defaultMode": 0o440}})
+        mounts.append({"name": "git", "mountPath": "/etc/workspace/git", "readOnly": True})
+
+    for p in list(profile.get("hostPaths", [])) + list(spec.get("hostPaths", [])):
+        vname = "host-" + (re.sub(r"[^a-z0-9]+", "-", p.strip("/").lower()).strip("-") or "root")
+        if any(v["name"] == vname for v in volumes):
+            continue
+        volumes.append({"name": vname, "hostPath": {"path": p}})
+        mounts.append({"name": vname, "mountPath": p, "readOnly": p in ("/lib/modules", "/usr/src", "/lib/firmware")})
+
+    resources = {"requests": {"cpu": spec["cpuRequest"], "memory": spec["memoryRequest"],
+                              "ephemeral-storage": spec["ephemeralStorage"]},
+                 "limits": {"cpu": spec["cpu"], "memory": spec["memory"],
+                            "ephemeral-storage": spec["ephemeralStorage"]}}
+    for res, qty in spec.get("devices", {}).items():  # extended resources: requests must equal limits
+        resources["requests"][res] = qty
+        resources["limits"][res] = qty
+        if res.startswith("hugepages-") and not any(v["name"] == "hugepages" for v in volumes):
+            volumes.append({"name": "hugepages", "emptyDir": {"medium": "HugePages"}})
+            mounts.append({"name": "hugepages", "mountPath": "/dev/hugepages"})
+
+    if profile.get("privileged"):
+        csc = {"privileged": True, "runAsUser": 0}
+    else:
+        caps = sorted(set(profile.get("capabilities", [])) | set(spec.get("caps", [])))
+        csc = {"runAsUser": 0, "allowPrivilegeEscalation": True,  # sudo inside needs setuid
+               "capabilities": {"drop": ["ALL"], "add": caps}}
+
+    tcp_check = ["bash", "-c", f"exec 3<>/dev/tcp/127.0.0.1/{SSH_PORT}"]  # sshd listens on loopback by default
+    container = {
+        "name": "workspace",
+        "image": spec["image"],
+        "imagePullPolicy": "IfNotPresent",
+        "env": env,
+        "ports": [{"name": "ssh", "containerPort": SSH_PORT, "protocol": "TCP"}],
+        "resources": resources,
+        "securityContext": csc,
+        "volumeMounts": mounts,
+        "readinessProbe": {"exec": {"command": tcp_check}, "initialDelaySeconds": 2, "periodSeconds": 5},
+        "livenessProbe": {"exec": {"command": tcp_check}, "initialDelaySeconds": 30, "periodSeconds": 30, "failureThreshold": 5},
+    }
+
+    pod_sc = {"fsGroup": DEV_GID, "fsGroupChangePolicy": "OnRootMismatch",
+              "seccompProfile": {"type": "RuntimeDefault"},
+              # kubelet-"safe" sysctls, allowed by PSS baseline: ping without NET_RAW, bind low ports as dev.
+              "sysctls": [{"name": "net.ipv4.ping_group_range", "value": "0 2147483647"},
+                          {"name": "net.ipv4.ip_unprivileged_port_start", "value": "0"}]}
+    if profile.get("sysctls"):  # extra namespaced sysctls; "unsafe" ones need kubelet allowedUnsafeSysctls (lab pool)
+        pod_sc["sysctls"] += list(profile["sysctls"])
+    # Multicast interface tuning (rp_filter, igmp limits) is done by the NAD's chained
+    # `tuning` plugin at CNI ADD time, so it needs no pod-level sysctls and passes PSS baseline.
+
+    pod_spec = {
+        "serviceAccountName": "workspace",
+        "automountServiceAccountToken": True,  # heartbeat patches its own pod annotation
+        "terminationGracePeriodSeconds": 30,
+        "securityContext": pod_sc,
+        "containers": [container],
+        "volumes": volumes,
+    }
+    iso = cat["isolation"].get(spec["isolation"], {})
+    if "hostUsers" in iso:
+        pod_spec["hostUsers"] = iso["hostUsers"]
+    if iso.get("runtimeClass"):
+        pod_spec["runtimeClassName"] = iso["runtimeClass"]
+    if profile.get("nodeSelector"):
+        pod_spec["nodeSelector"] = profile["nodeSelector"]
+    if profile.get("tolerations"):
+        pod_spec["tolerations"] = profile["tolerations"]
+    if profile.get("exclusiveNode"):  # one lab workspace per node, across all tenants: a crashed driver only takes you down
+        pod_spec["affinity"] = {"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [
+            {"topologyKey": "kubernetes.io/hostname", "namespaceSelector": {},
+             "labelSelector": {"matchExpressions": [{"key": LABEL_TIER, "operator": "In", "values": ["lab"]}]}}]}}
+    if cat.get("pullSecret"):
+        pod_spec["imagePullSecrets"] = [{"name": cat["pullSecret"]}]
+
+    pod_ann = {}
+    if spec.get("multicast"):
+        pod_ann[ANN_NETWORKS] = cat["networking"]["multicast"]["nad"]
+
+    objs.append({
+        "apiVersion": "apps/v1", "kind": "StatefulSet",
+        "metadata": {"name": obj, "namespace": ns, "labels": labels,
+                     "annotations": {ANN_IDLE: spec["idleTimeout"], ANN_SPEC: json.dumps(spec, sort_keys=True)}},
+        "spec": {"serviceName": obj, "replicas": 1, "selector": {"matchLabels": sel},
+                 "updateStrategy": {"type": "RollingUpdate"},
+                 "template": {"metadata": {"labels": labels, **({"annotations": pod_ann} if pod_ann else {})},
+                              "spec": pod_spec}},
+    })
+
+    if spec.get("expose"):
+        objs.append({"apiVersion": "v1", "kind": "Service",
+                     "metadata": {"name": f"{obj}-public", "namespace": ns, "labels": labels},
+                     "spec": {"type": "LoadBalancer", "selector": sel,
+                              "ports": [{"name": "ssh", "port": 22, "targetPort": "ssh"}]}})
+        objs.append({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+                     "metadata": {"name": f"{obj}-allow-ssh", "namespace": ns, "labels": labels},
+                     "spec": {"podSelector": {"matchLabels": sel}, "policyTypes": ["Ingress"],
+                              "ingress": [{"ports": [{"port": SSH_PORT, "protocol": "TCP"}]}]}})
+    return objs
+
+
+def render_tenant(user: str, tier: str, cat: dict, opts: dict, api_ips: list[str], api_ports: list[int]) -> list[dict]:
+    ns = tenant_namespace(user, tier)
+    psa = "baseline" if tier == "standard" else "privileged"
+    ns_labels = {LABEL_TENANT: user, LABEL_TIER: tier, LABEL_MANAGED: "workspace-cli",
+                 "pod-security.kubernetes.io/enforce": psa,
+                 "pod-security.kubernetes.io/audit": psa,
+                 "pod-security.kubernetes.io/warn": psa}
+    meta = lambda n: {"name": n, "namespace": ns, "labels": {LABEL_MANAGED: "workspace-cli"}}  # noqa: E731
+    net = cat["networking"]
+    egress = [
+        {"to": [{"podSelector": {}}]},                                   # your own workspaces
+        {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}],
+         "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
+    ]
+    if api_ips:
+        egress.append({"to": [{"ipBlock": {"cidr": f"{ip}/32"}} for ip in api_ips],
+                       "ports": [{"protocol": "TCP", "port": p} for p in api_ports]})
+    egress.append({"to": [{"ipBlock": {"cidr": "0.0.0.0/0",
+                                       "except": list(net.get("clusterCIDRs", [])) + list(net.get("blockedEgress", []))}}]})
+    objs = [
+        {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": ns, "labels": ns_labels}},
+        {"apiVersion": "v1", "kind": "ResourceQuota", "metadata": meta("workspace-quota"),
+         "spec": {"hard": {"requests.cpu": opts["cpu"], "requests.memory": opts["memory"], "limits.memory": opts["memory"],
+                           "requests.storage": opts["storage"], "persistentvolumeclaims": "20",
+                           "pods": "20", "count/statefulsets.apps": "20"}}},
+        {"apiVersion": "v1", "kind": "LimitRange", "metadata": meta("workspace-defaults"),
+         "spec": {"limits": [{"type": "Container",
+                              "default": {"cpu": "2", "memory": "4Gi", "ephemeral-storage": "10Gi"},
+                              "defaultRequest": {"cpu": "250m", "memory": "512Mi", "ephemeral-storage": "1Gi"}}]}},
+        {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": meta("workspace"), "automountServiceAccountToken": False},
+        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": meta("workspace-heartbeat"),
+         "rules": [{"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "patch"]}]},
+        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": meta("workspace-heartbeat"),
+         "subjects": [{"kind": "ServiceAccount", "name": "workspace", "namespace": ns}],
+         "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "workspace-heartbeat"}},
+        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": meta("workspace-developer"),
+         "subjects": [{"kind": opts["subject_kind"], "name": opts["subject"], "apiGroup": "rbac.authorization.k8s.io"}],
+         "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "workspace-developer"}},
+        {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta("tenant-ingress"),
+         "spec": {"podSelector": {}, "policyTypes": ["Ingress"],
+                  "ingress": [{"from": [{"podSelector": {}}]}]}},               # same namespace only
+        {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta("tenant-egress"),
+         "spec": {"podSelector": {}, "policyTypes": ["Egress"], "egress": egress}},
+    ]
+    return objs
+
+
+# ------------------------------------------------------------------ lifecycle
+def get_workspace(k: Kube, ns: str, name: str) -> dict:
+    sts = k.get("statefulset", ssh_alias(name), ns=ns)
+    if not sts:
+        raise CliError(f"workspace '{name}' not found in namespace {ns} (try: workspace list)")
+    return sts
+
+
+def wait_ready(k: Kube, ns: str, name: str, timeout: int) -> dict:
+    pod = f"{ssh_alias(name)}-0"
+    deadline, last = time.time() + timeout, ""
+    while time.time() < deadline:
+        p = k.get("pod", pod, ns=ns)
+        if p:
+            st = p.get("status", {})
+            conds = {c["type"]: c["status"] for c in st.get("conditions", [])}
+            if st.get("phase") == "Running" and conds.get("Ready") == "True":
+                return p
+            detail = ""
+            for cs in st.get("containerStatuses", []) + st.get("initContainerStatuses", []):
+                w = cs.get("state", {}).get("waiting")
+                if w:
+                    detail = f"{w.get('reason', '')} {w.get('message', '')}".strip()
+            if not detail and conds.get("PodScheduled") == "False":
+                detail = next((c.get("message", "") for c in st.get("conditions", []) if c["type"] == "PodScheduled"), "")
+            msg = f"{st.get('phase', '?')} {detail}".strip()
+        else:
+            msg = "waiting for pod"
+        if msg != last:
+            info(f"{pod}: {msg}")
+            last = msg
+        time.sleep(2)
+    raise CliError(f"timed out after {timeout}s waiting for {pod}; try: workspace status {name}")
+
+
+def ensure_running(k: Kube, ns: str, name: str, timeout: int) -> dict:
+    obj = ssh_alias(name)
+    pod = k.get("pod", f"{obj}-0", ns=ns)
+    if pod and pod["status"].get("phase") == "Running" and \
+            any(c["type"] == "Ready" and c["status"] == "True" for c in pod["status"].get("conditions", [])):
+        return pod
+    sts = get_workspace(k, ns, name)
+    if (sts["spec"].get("replicas") or 0) == 0:
+        info(f"starting {name} (cold start, usually under a minute)")
+        k.run(["scale", "statefulset", obj, "--replicas=1"], ns=ns)
+    return wait_ready(k, ns, name, timeout)
+
+
+def apiserver_endpoints(k: Kube) -> tuple[list[str], list[int]]:
+    ips: set[str] = set()
+    ports: set[int] = set()
+    slices = k.get("endpointslices", ns="default", selector="kubernetes.io/service-name=kubernetes")
+    for s in (slices or {}).get("items", []):
+        for e in s.get("endpoints", []):
+            ips.update(e.get("addresses", []))
+        for p in s.get("ports", []):
+            if p.get("port"):
+                ports.add(int(p["port"]))
+    if not ips:
+        ep = k.get("endpoints", "kubernetes", ns="default")
+        for ss in (ep or {}).get("subsets", []):
+            ips.update(a["ip"] for a in ss.get("addresses", []))
+            ports.update(int(p["port"]) for p in ss.get("ports", []))
+    return sorted(ips), sorted(ports) or [6443]
+
+
+# ------------------------------------------------------------------- commands
+def cmd_create(args, k: Kube) -> int:
+    cat = load_catalog(k)
+    d = cat["defaults"]
+    profile_name = args.profile or d["profile"]
+    profile = cat["profiles"].get(profile_name)
+    if not profile:
+        raise CliError(f"unknown profile {profile_name!r}; available: {', '.join(cat['profiles'])}")
+    # --lang go,python: the first language picks the image, the rest are installed as features
+    # (or a baked combined image like workspace-go-python is used when --image names one).
+    languages = [l.strip() for l in args.lang.split(",") if l.strip()]
+    unknown_langs = [l for l in languages if l not in cat["languages"]]
+    if not languages or unknown_langs:
+        raise CliError(f"unknown language(s) {', '.join(unknown_langs) or args.lang!r}; available: {', '.join(cat['languages'])}")
+    primary = languages[0]
+    tools = [t.strip() for t in (args.tools or "").split(",") if t.strip()]
+    for extra in languages[1:]:
+        if extra != "base" and extra not in tools:
+            tools.append(extra)
+    unknown = [t for t in tools if t not in cat["tools"]]
+    if unknown and not args.allow_unknown_tools:
+        raise CliError(f"unknown tool(s) {', '.join(unknown)}; available: {', '.join(cat['tools'])} "
+                       "(use --allow-unknown-tools if your image provides them)")
+    name = args.name or primary
+    if not NAME_RE.match(name):
+        raise CliError(f"name {name!r} must be lowercase alphanumeric/dashes, max 40 chars")
+
+    ns = resolve_namespace(args, k, profile.get("tier", "standard"))
+    k.namespace = ns
+    if not args.dry_run and not k.get("namespace", ns, ns=NO_NS):
+        raise CliError(f"namespace {ns} does not exist — ask a platform admin to run: "
+                       f"workspace admin onboard <you>{' --lab' if profile.get('tier') == 'lab' else ''}")
+    obj = ssh_alias(name)
+    existing = None if args.dry_run else k.get("statefulset", obj, ns=ns)
+    if existing and (existing["spec"].get("replicas") or 0) > 0 and not args.yes:
+        ans = input(f"workspace '{name}' exists and is running; re-applying restarts it. Continue? [y/N] ")
+        if ans.strip().lower() not in ("y", "yes"):
+            return 1
+
+    devices = {}
+    for item in args.device or []:
+        if "=" not in item:
+            raise CliError(f"--device expects resource=quantity, got {item!r}")
+        res, qty = item.split("=", 1)
+        devices[res.strip()] = qty.strip()
+    isolation = args.isolation or profile.get("isolation") or d["isolation"]
+    if isolation not in cat["isolation"]:
+        raise CliError(f"unknown isolation {isolation!r}; available: {', '.join(cat['isolation'])}")
+    if profile.get("tier") != "lab" and (devices or args.host_path or args.cap):
+        warn("devices, host paths and extra capabilities need a lab profile (--profile hardware|kernel); "
+             "the baseline Pod Security policy will reject them in a standard namespace")
+
+    spec = {
+        "lang": primary, "languages": languages, "tools": tools, "profile": profile_name, "isolation": isolation,
+        "image": args.image or f"{cat['registry']}/{cat['languages'][primary]['image']}:{args.tag or cat['tag']}",
+        "repo": args.repo or "", "branch": args.branch or "", "dotfiles": args.dotfiles or "",
+        "gitName": args.git_name or "", "gitEmail": args.git_email or "",
+        "size": args.size or d["size"], "storageClass": args.storage_class or d.get("storageClass", ""),
+        "cpu": args.cpu or d["cpu"], "memory": args.memory or d["memory"],
+        "cpuRequest": args.cpu_request or d["cpuRequest"], "memoryRequest": args.memory_request or d["memoryRequest"],
+        "ephemeralStorage": d.get("ephemeralStorage", "20Gi"),
+        "multicast": bool(args.multicast), "devices": devices, "hostPaths": args.host_path or [],
+        "caps": args.cap or [], "expose": bool(args.expose), "tz": args.tz or "",
+        "idleTimeout": args.idle_timeout or d["idleTimeout"],
+        "createdAt": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    parse_duration(spec["idleTimeout"])  # validate
+
+    client_key, client_pub = ensure_client_key(ns, name)
+    hostkey = host_keypair(k, ns, obj, args.rotate_host_key) if not args.dry_run else generate_keypair("dry-run")
+    git_mode, git_secret, deploy_pub = resolve_git_auth(args, k, ns, obj)
+    spec["gitAuth"] = git_mode
+    objs = render_workspace(ns, name, spec, cat, profile, client_pub, hostkey, git_secret)
+
+    if args.dry_run:
+        sys.stdout.write(dump_objects(objs))
+        return 0
+
+    if k.get("persistentvolumeclaim", f"{obj}-home", ns=ns):
+        info("keeping the existing home volume (resize it with kubectl if your StorageClass allows expansion)")
+        objs = [o for o in objs if o["kind"] != "PersistentVolumeClaim"]
+    for line in k.apply(objs).strip().splitlines():
+        info(line)
+
+    alias = write_ssh_config(ns, name, client_key, k.context, args.git_agent)
+    write_known_host(alias, hostkey[1])
+    if not args.no_wait:
+        wait_ready(k, ns, name, args.timeout)
+    print(f"\nworkspace '{name}' is {'ready' if not args.no_wait else 'starting'} in namespace {ns}\n")
+    print(f"  ssh         ssh {alias}            (or: workspace ssh {name})")
+    print(f"  VS Code     code --remote ssh-remote+{alias} /workspace   (or Remote-SSH: Connect to Host → {alias})")
+    print(f"  stop/start  workspace stop {name} · workspace start {name}   (auto-stops after {spec['idleTimeout']} idle)")
+    if deploy_pub:
+        host = git_host(spec["repo"]) or "your git host"
+        print(f"\n  git: this workspace has its own deploy key. Add it to {host} (repo deploy key with write access,")
+        print(f"       or your account's SSH keys) so the workspace can clone on boot and push:\n\n    {deploy_pub}\n")
+    return 0
+
+
+def cmd_list(args, k: Kube) -> int:
+    extra = ["-A"] if args.all_namespaces else []
+    ns = NO_NS if args.all_namespaces else resolve_namespace(args, k)
+    sts = (k.get("statefulsets", ns=ns, selector=LABEL_WS, extra=extra) or {}).get("items", [])
+    pods = {(p["metadata"]["namespace"], p["metadata"]["name"]): p
+            for p in (k.get("pods", ns=ns, selector=LABEL_WS, extra=extra) or {}).get("items", [])}
+    rows = [("NAMESPACE", "NAME", "LANG", "PROFILE", "STATUS", "IDLE-TIMEOUT", "LAST-ACTIVE", "NODE")]
+    now = utcnow()
+    for s in sorted(sts, key=lambda s: (s["metadata"]["namespace"], s["metadata"]["name"])):
+        m = s["metadata"]
+        pod = pods.get((m["namespace"], f"{m['name']}-0"))
+        if (s["spec"].get("replicas") or 0) == 0:
+            status = "Stopped"
+        elif s.get("status", {}).get("readyReplicas"):
+            status = "Running"
+        else:
+            status = (pod or {}).get("status", {}).get("phase", "Starting")
+        last = (pod or {}).get("metadata", {}).get("annotations", {}).get(ANN_ACTIVE)
+        last_s = human_duration((now - parse_ts(last)).total_seconds()) + " ago" if last else "-"
+        rows.append((m["namespace"], m["labels"].get(LABEL_WS, m["name"]), m["labels"].get(LABEL_LANG, "-"),
+                     m["labels"].get(LABEL_PROFILE, "-"), status, m.get("annotations", {}).get(ANN_IDLE, "-"),
+                     last_s, (pod or {}).get("spec", {}).get("nodeName") or "-"))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+    if len(rows) == 1:
+        info("no workspaces yet: workspace create --lang <lang>")
+    return 0
+
+
+def cmd_status(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    sts = get_workspace(k, ns, args.name)
+    obj = ssh_alias(args.name)
+    spec = json.loads(sts["metadata"].get("annotations", {}).get(ANN_SPEC, "{}"))
+    pod = k.get("pod", f"{obj}-0", ns=ns)
+    pvc = k.get("persistentvolumeclaim", f"{obj}-home", ns=ns)
+    print(f"workspace {args.name}  (namespace {ns})")
+    print(f"  image       {spec.get('image', '-')}")
+    print(f"  languages   {', '.join(spec.get('languages') or [spec.get('lang', '-')])}")
+    print(f"  tools       {', '.join(spec.get('tools', [])) or 'none'}")
+    print(f"  profile     {spec.get('profile', '-')}  isolation={spec.get('isolation', '-')}  multicast={spec.get('multicast', False)}")
+    print(f"  resources   cpu {spec.get('cpuRequest')}→{spec.get('cpu')}  mem {spec.get('memoryRequest')}→{spec.get('memory')}"
+          + (f"  devices {spec.get('devices')}" if spec.get('devices') else ""))
+    print(f"  volume      {obj}-home  {(pvc or {}).get('status', {}).get('capacity', {}).get('storage', spec.get('size'))}  "
+          f"({(pvc or {}).get('status', {}).get('phase', 'missing')})")
+    print(f"  repo        {spec.get('repo') or '-'}  branch={spec.get('branch') or 'default'}  auth={spec.get('gitAuth')}")
+    print(f"  idle        stops after {sts['metadata'].get('annotations', {}).get(ANN_IDLE, '?')} without ssh/editor activity")
+    if (sts["spec"].get("replicas") or 0) == 0:
+        print("  state       Stopped (workspace start %s, or just ssh in)" % args.name)
+    elif pod:
+        st = pod["status"]
+        ready = any(c["type"] == "Ready" and c["status"] == "True" for c in st.get("conditions", []))
+        last = pod["metadata"].get("annotations", {}).get(ANN_ACTIVE)
+        print(f"  state       {st.get('phase')}{' (ready)' if ready else ''}  node={pod['spec'].get('nodeName', '-')}  "
+              f"started={st.get('startTime', '-')}  last-active={last or '-'}")
+        for cs in st.get("containerStatuses", []):
+            w = cs.get("state", {}).get("waiting")
+            if w:
+                print(f"  waiting     {w.get('reason')}: {w.get('message', '')}")
+    print(f"  connect     ssh {obj}   |   code --remote ssh-remote+{obj} /workspace")
+    if spec.get("expose"):
+        svc = k.get("service", f"{obj}-public", ns=ns) or {}
+        ing = (svc.get("status", {}).get("loadBalancer", {}).get("ingress") or [{}])[0]
+        addr = ing.get("ip") or ing.get("hostname") or "<pending>"
+        print(f"  public ssh  ssh -p 22 dev@{addr}   (LoadBalancer {obj}-public; key auth only)")
+    return 0
+
+
+def cmd_start(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    ensure_running(k, ns, args.name, args.timeout)
+    info(f"{args.name} is running")
+    return 0
+
+
+def cmd_stop(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    get_workspace(k, ns, args.name)
+    k.run(["scale", "statefulset", ssh_alias(args.name), "--replicas=0"], ns=ns)
+    info(f"{args.name} stopped; the home volume is kept. `workspace start {args.name}` or ssh to resume")
+    return 0
+
+
+def cmd_delete(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    obj = ssh_alias(args.name)
+    get_workspace(k, ns, args.name)
+    if not args.yes:
+        what = "the workspace AND its home volume (all code not pushed is lost)" if args.purge else "the workspace (volume kept)"
+        if input(f"Delete {what} for '{args.name}' in {ns}? [y/N] ").strip().lower() not in ("y", "yes"):
+            return 1
+    k.run(["delete", "statefulset,service,secret,networkpolicy", "-l", f"{LABEL_WS}={args.name}", "--ignore-not-found"], ns=ns)
+    if args.purge:
+        k.run(["delete", "persistentvolumeclaim", f"{obj}-home", "--ignore-not-found"], ns=ns)
+        for p in (KEYS_DIR / f"{ns}--{args.name}", KEYS_DIR / f"{ns}--{args.name}.pub"):
+            p.unlink(missing_ok=True)
+    remove_ssh_config(ns, args.name)
+    write_known_host(obj, None)
+    info(f"deleted {args.name}" + ("" if args.purge else f" (volume {obj}-home kept; --purge removes it)"))
+    return 0
+
+
+def cmd_ssh(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    get_workspace(k, ns, args.name)
+    if not shutil.which("ssh"):
+        raise CliError("ssh client not found")
+    return subprocess.call(["ssh", ssh_alias(args.name)] + list(args.command))
+
+
+def cmd_code(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    get_workspace(k, ns, args.name)
+    if not shutil.which("code"):
+        raise CliError("`code` CLI not found; in VS Code run 'Shell Command: Install code command in PATH'")
+    return subprocess.call(["code", "--remote", f"ssh-remote+{ssh_alias(args.name)}", args.path])
+
+
+def cmd_proxy(args, k: Kube) -> int:
+    """ssh ProxyCommand: start the workspace if needed, then bridge stdio to sshd through the API server."""
+    ns = args.namespace or resolve_namespace(args, k)
+    try:
+        ensure_running(k, ns, args.name, args.timeout)
+    except CliError as e:
+        print(f"workspace: {e}", file=sys.stderr)
+        return 255
+    cmd = k.cmd(["exec", "-i", "-q", f"{ssh_alias(args.name)}-0", "-c", "workspace", "--",
+                 "socat", "-", f"TCP:127.0.0.1:{SSH_PORT}"], ns=ns)
+    if os.name == "nt":
+        return subprocess.call(cmd)
+    os.execvp(cmd[0], cmd)
+    return 0
+
+
+def cmd_port_forward(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    ensure_running(k, ns, args.name, args.timeout)
+    return subprocess.call(k.cmd(["port-forward", f"pod/{ssh_alias(args.name)}-0"] + list(args.ports), ns=ns))
+
+
+def cmd_logs(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    get_workspace(k, ns, args.name)
+    return subprocess.call(k.cmd(["logs", f"{ssh_alias(args.name)}-0", "-c", "workspace"] + (["-f"] if args.follow else []), ns=ns))
+
+
+def cmd_ssh_config(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    obj = ssh_alias(args.name)
+    get_workspace(k, ns, args.name)
+    secret = k.get("secret", f"{obj}-ssh", ns=ns)
+    if not secret:
+        raise CliError(f"secret {obj}-ssh missing; re-run workspace create")
+    key, pub = ensure_client_key(ns, args.name)
+    authorized = b64d(secret["data"].get("authorized_keys", ""))
+    if pub not in authorized:
+        secret_patch = {"stringData": {"authorized_keys": authorized.rstrip("\n") + "\n" + pub + "\n"}}
+        k.run(["patch", "secret", f"{obj}-ssh", "--type=merge", "-p", json.dumps(secret_patch)], ns=ns)
+        info("added this machine's key to the workspace (live within about a minute; sshd reads the Secret mount)")
+    alias = write_ssh_config(ns, args.name, key, k.context, args.git_agent)
+    write_known_host(alias, b64d(secret["data"]["ssh_host_ed25519_key.pub"]).strip())
+    info(f"wrote {SSH_CONFIG} entry 'Host {alias}'")
+    return 0
+
+
+def cmd_idle(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    get_workspace(k, ns, args.name)
+    parse_duration(args.duration)
+    k.run(["annotate", "statefulset", ssh_alias(args.name), f"{ANN_IDLE}={args.duration}", "--overwrite"], ns=ns)
+    info(f"{args.name}: idle timeout = {args.duration}")
+    return 0
+
+
+def cmd_catalog(args, k: Kube) -> int:
+    cat = load_catalog(k)
+    if args.json:
+        print(json.dumps(cat, indent=2))
+        return 0
+    print(f"registry {cat['registry']}  tag {cat['tag']}"
+          + (f"  artifactory {cat['artifactory']['url']}" if (cat.get('artifactory') or {}).get('url') else "") + "\n")
+    print("languages (--lang a or --lang a,b)")
+    for n, v in cat["languages"].items():
+        print(f"  {n:14} {v.get('description', '')}")
+    print("\ntools (--tools a,b,c)")
+    for n, v in cat["tools"].items():
+        src = "  [built in]" if v.get("builtin") else ("  [artifactory]" if v.get("artifact") else "")
+        print(f"  {n:14} {v.get('description', '')}{src}")
+    print("\nprofiles (--profile)")
+    for n, v in cat["profiles"].items():
+        print(f"  {n:12} [{v.get('tier', 'standard')}] {v.get('description', '')}")
+    print("\nisolation (--isolation)")
+    for n, v in cat["isolation"].items():
+        print(f"  {n:12} {v.get('description', '')}")
+    return 0
+
+
+def cmd_admin_onboard(args, k: Kube) -> int:
+    cat = load_catalog(k)
+    user = sanitize_user(args.user)
+    subject = args.subject or args.user
+    opts = {"cpu": args.cpu, "memory": args.memory, "storage": args.storage,
+            "subject": subject, "subject_kind": "Group" if args.group else "User"}
+    api_ips, api_ports = ([], []) if args.dry_run and args.offline else apiserver_endpoints(k)
+    objs = render_tenant(user, "standard", cat, opts, api_ips, api_ports)
+    if args.lab:
+        objs += render_tenant(user, "lab", cat, opts, api_ips, api_ports)
+    if cat.get("pullSecret"):
+        src = k.get("secret", cat["pullSecret"], ns=SYSTEM_NS)
+        if src:
+            for ns in {o["metadata"]["name"] for o in objs if o["kind"] == "Namespace"}:
+                objs.append({"apiVersion": "v1", "kind": "Secret", "type": src["type"], "data": src["data"],
+                             "metadata": {"name": cat["pullSecret"], "namespace": ns}})
+        else:
+            warn(f"pull secret {SYSTEM_NS}/{cat['pullSecret']} not found; workspaces may fail to pull images")
+    if args.dry_run:
+        sys.stdout.write(dump_objects(objs))
+        return 0
+    for line in k.apply(objs).strip().splitlines():
+        info(line)
+    print(f"onboarded {subject}: namespace ws-{user}" + (f" and ws-{user}-lab" if args.lab else ""))
+    print(f"they can now run: workspace create --lang <lang> --namespace ws-{user}  "
+          f"(the namespace is inferred when their kubectl identity is {subject})")
+    return 0
+
+
+def cmd_admin_reap(args, k: Kube) -> int:
+    cat = load_catalog(k)
+    default_idle = cat["defaults"]["idleTimeout"]
+    extra = ["-A"] if args.all_namespaces else []
+    ns = NO_NS if args.all_namespaces else resolve_namespace(args, k)
+    now, stopped = utcnow(), 0
+    for sts in (k.get("statefulsets", ns=ns, selector=LABEL_WS, extra=extra) or {}).get("items", []):
+        m = sts["metadata"]
+        sns, obj = m["namespace"], m["name"]
+        if (sts["spec"].get("replicas") or 0) == 0:
+            continue
+        timeout = parse_duration(m.get("annotations", {}).get(ANN_IDLE, default_idle))
+        if timeout <= 0:
+            continue
+        pod = k.get("pod", f"{obj}-0", ns=sns)
+        if not pod:
+            continue
+        last = pod["metadata"].get("annotations", {}).get(ANN_ACTIVE) or pod["status"].get("startTime")
+        if not last:
+            continue
+        idle = (now - parse_ts(last)).total_seconds()
+        if idle > timeout:
+            print(f"{sns}/{obj}: idle {human_duration(idle)} > {human_duration(timeout)} → stopping"
+                  + (" (dry run)" if args.dry_run else ""))
+            if not args.dry_run:
+                k.run(["scale", "statefulset", obj, "--replicas=0"], ns=sns)
+            stopped += 1
+        elif args.verbose:
+            print(f"{sns}/{obj}: idle {human_duration(idle)} / {human_duration(timeout)}")
+    print(f"reaper: {stopped} workspace(s) stopped")
+    return 0
+
+
+# ---------------------------------------------------------------------- parser
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="workspace", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version=f"workspace {VERSION}")
+    p.add_argument("-n", "--namespace", help="tenant namespace (default: ws-<your username>)")
+    p.add_argument("--context", help="kubeconfig context")
+    p.add_argument("--catalog", metavar="FILE", help="use this catalog.json instead of the cluster ConfigMap (GitOps/CI, --offline)")
+    # The same two options are accepted after the subcommand too (`workspace list -n x`);
+    # SUPPRESS keeps an unset sub-level option from clobbering the top-level value.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("-n", "--namespace", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    common.add_argument("--context", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def add(name, fn, help, **kw):
+        sp = sub.add_parser(name, help=help, parents=[common], **kw)
+        sp.set_defaults(func=fn)
+        return sp
+
+    c = add("create", cmd_create, "create (or update) a workspace")
+    c.add_argument("name", nargs="?", help="workspace name (default: the language)")
+    c.add_argument("--lang", required=True, help="language(s) from the catalog, e.g. rust or go,python (first one picks the image)")
+    c.add_argument("--tools", help="comma-separated tools from the catalog, e.g. cmake,git,gdb,ripgrep")
+    c.add_argument("--tag", help="image tag to use instead of the catalog default (see `workspace catalog`)")
+    c.add_argument("--repo", help="git URL to clone on first boot (ssh:// or git@ for pushes)")
+    c.add_argument("--branch")
+    c.add_argument("--dotfiles", help="git URL of a dotfiles repo; its install.sh runs on first boot")
+    c.add_argument("--git-auth", choices=["deploy-key", "ssh", "token", "none"], default="deploy-key",
+                   help="deploy-key (default): a key only this workspace holds; ssh: --git-key; token: --git-token-stdin")
+    c.add_argument("--git-key", help="path to an SSH private key to copy into the workspace (sets --git-auth ssh)")
+    c.add_argument("--git-token-stdin", action="store_true", help="read an HTTPS token from stdin (sets --git-auth token)")
+    c.add_argument("--git-token-user", default="x-access-token")
+    c.add_argument("--git-agent", action="store_true", help="forward your local ssh-agent (ForwardAgent yes)")
+    c.add_argument("--git-name"), c.add_argument("--git-email")
+    c.add_argument("--rotate-git-key", action="store_true"), c.add_argument("--rotate-host-key", action="store_true")
+    c.add_argument("--profile", help="standard (default) | hardware | kernel — see `workspace catalog`")
+    c.add_argument("--isolation", help="userns (default) | gvisor | kata | none")
+    c.add_argument("--image", help="override the catalog image, e.g. a baked variant")
+    c.add_argument("--size", help="home volume size, e.g. 50Gi")
+    c.add_argument("--storage-class")
+    c.add_argument("--cpu"), c.add_argument("--memory"), c.add_argument("--cpu-request"), c.add_argument("--memory-request")
+    c.add_argument("--multicast", action="store_true", help="attach the multicast-capable secondary network")
+    c.add_argument("--device", action="append", metavar="RESOURCE=QTY",
+                   help="device-plugin resource, e.g. nvidia.com/gpu=1, smarter-devices/ttyUSB0=1, hugepages-2Mi=1Gi")
+    c.add_argument("--host-path", action="append", metavar="PATH", help="extra host path to mount (lab profiles only)")
+    c.add_argument("--cap", action="append", metavar="CAP", help="extra Linux capability (lab profiles only)")
+    c.add_argument("--expose", action="store_true", help="also publish sshd on a LoadBalancer Service")
+    c.add_argument("--idle-timeout", help="auto-stop after this much inactivity (e.g. 4h, 30m, off)")
+    c.add_argument("--tz", help="container timezone, e.g. America/Chicago")
+    c.add_argument("--allow-unknown-tools", action="store_true")
+    c.add_argument("--timeout", type=int, default=600, help="seconds to wait for readiness")
+    c.add_argument("--no-wait", action="store_true")
+    c.add_argument("--dry-run", action="store_true", help="print the manifests as YAML and exit")
+    c.add_argument("--offline", action="store_true", help="with --dry-run: never call kubectl (requires --namespace)")
+    c.add_argument("-y", "--yes", action="store_true")
+
+    l = add("list", cmd_list, "list workspaces")
+    l.add_argument("-A", "--all-namespaces", action="store_true")
+    s = add("status", cmd_status, "show a workspace"); s.add_argument("name")
+    st = add("start", cmd_start, "start a stopped workspace"); st.add_argument("name"); st.add_argument("--timeout", type=int, default=600)
+    sp = add("stop", cmd_stop, "stop a workspace (keeps the volume)"); sp.add_argument("name")
+    d = add("delete", cmd_delete, "delete a workspace"); d.add_argument("name")
+    d.add_argument("--purge", action="store_true", help="also delete the home volume"); d.add_argument("-y", "--yes", action="store_true")
+    sh_ = add("ssh", cmd_ssh, "ssh into a workspace (starts it if stopped)"); sh_.add_argument("name")
+    sh_.add_argument("command", nargs=argparse.REMAINDER, help="optional remote command")
+    co = add("code", cmd_code, "open VS Code on a workspace"); co.add_argument("name"); co.add_argument("path", nargs="?", default="/workspace")
+    pr = add("proxy", cmd_proxy, "ssh ProxyCommand helper (used by ~/.ssh/config)"); pr.add_argument("name"); pr.add_argument("--timeout", type=int, default=600)
+    pf = add("port-forward", cmd_port_forward, "forward ports via kubectl"); pf.add_argument("name"); pf.add_argument("ports", nargs="+"); pf.add_argument("--timeout", type=int, default=600)
+    lg = add("logs", cmd_logs, "boot/tool-install logs"); lg.add_argument("name"); lg.add_argument("-f", "--follow", action="store_true")
+    sc = add("ssh-config", cmd_ssh_config, "(re)write the ~/.ssh/config entry, e.g. on a second machine"); sc.add_argument("name"); sc.add_argument("--git-agent", action="store_true")
+    idl = add("idle", cmd_idle, "change the auto-stop timeout"); idl.add_argument("name"); idl.add_argument("duration", help="e.g. 8h, 30m, off")
+    ct = add("catalog", cmd_catalog, "show languages, tools and profiles"); ct.add_argument("--json", action="store_true")
+
+    a = sub.add_parser("admin", help="platform-admin commands")
+    asub = a.add_subparsers(dest="admin_cmd", required=True)
+    ob = asub.add_parser("onboard", help="create a developer's namespaces, quota, RBAC and network policy", parents=[common])
+    ob.set_defaults(func=cmd_admin_onboard)
+    ob.add_argument("user", help="developer username as the API server sees it (e.g. alice or alice@corp.example)")
+    ob.add_argument("--subject", help="RBAC subject name if it differs from USER")
+    ob.add_argument("--group", action="store_true", help="USER is a group name")
+    ob.add_argument("--lab", action="store_true", help="also create the privileged ws-<user>-lab namespace")
+    ob.add_argument("--cpu", default="16"), ob.add_argument("--memory", default="64Gi"), ob.add_argument("--storage", default="500Gi")
+    ob.add_argument("--dry-run", action="store_true"), ob.add_argument("--offline", action="store_true", help="with --dry-run: skip API-server lookups")
+    rp = asub.add_parser("reap", help="stop idle workspaces (run by the CronJob)", parents=[common])
+    rp.set_defaults(func=cmd_admin_reap)
+    rp.add_argument("-A", "--all-namespaces", action="store_true"), rp.add_argument("--dry-run", action="store_true")
+    rp.add_argument("-v", "--verbose", action="store_true")
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    global CATALOG_FILE
+    CATALOG_FILE = getattr(args, "catalog", None) or os.environ.get("WORKSPACE_CATALOG") or None
+    try:
+        k = Kube(context=args.context, namespace=args.namespace, offline=bool(getattr(args, "offline", False)))
+        return int(args.func(args, k) or 0)
+    except CliError as e:
+        print(f"workspace: error: {e}", file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as e:
+        print(f"workspace: error: {' '.join(e.cmd)} failed: {(e.stderr or '').strip()}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

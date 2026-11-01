@@ -1,0 +1,307 @@
+# Rendered by:
+#   workspace --catalog deploy/platform/catalog.json admin onboard alice@corp.example --lab --dry-run --offline
+# Two namespaces per developer: ws-alice (PSS baseline) and ws-alice-lab (PSS privileged), each with quota,
+# a heartbeat ServiceAccount, the developer RoleBinding and default-deny-style NetworkPolicies.
+# (Run without --offline the egress policy also allow-lists the API server endpoint IPs.)
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ws-alice
+  labels:
+    devspaces.io/tenant: alice
+    devspaces.io/tier: standard
+    app.kubernetes.io/managed-by: workspace-cli
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workspace-quota
+  namespace: ws-alice
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  hard:
+    requests.cpu: "16"
+    requests.memory: 64Gi
+    limits.memory: 64Gi
+    requests.storage: 500Gi
+    persistentvolumeclaims: "20"
+    pods: "20"
+    count/statefulsets.apps: "20"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: workspace-defaults
+  namespace: ws-alice
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  limits:
+  - type: Container
+    default:
+      cpu: "2"
+      memory: 4Gi
+      ephemeral-storage: 10Gi
+    defaultRequest:
+      cpu: 250m
+      memory: 512Mi
+      ephemeral-storage: 1Gi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: workspace
+  namespace: ws-alice
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workspace-heartbeat
+  namespace: ws-alice
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workspace-heartbeat
+  namespace: ws-alice
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+subjects:
+- kind: ServiceAccount
+  name: workspace
+  namespace: ws-alice
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workspace-heartbeat
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workspace-developer
+  namespace: ws-alice
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+subjects:
+- kind: User
+  name: alice@corp.example
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workspace-developer
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-ingress
+  namespace: ws-alice
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-egress
+  namespace: ws-alice
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector: {}
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.244.0.0/16
+        - 10.96.0.0/12
+        - 169.254.169.254/32
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ws-alice-lab
+  labels:
+    devspaces.io/tenant: alice
+    devspaces.io/tier: lab
+    app.kubernetes.io/managed-by: workspace-cli
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workspace-quota
+  namespace: ws-alice-lab
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  hard:
+    requests.cpu: "16"
+    requests.memory: 64Gi
+    limits.memory: 64Gi
+    requests.storage: 500Gi
+    persistentvolumeclaims: "20"
+    pods: "20"
+    count/statefulsets.apps: "20"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: workspace-defaults
+  namespace: ws-alice-lab
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  limits:
+  - type: Container
+    default:
+      cpu: "2"
+      memory: 4Gi
+      ephemeral-storage: 10Gi
+    defaultRequest:
+      cpu: 250m
+      memory: 512Mi
+      ephemeral-storage: 1Gi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: workspace
+  namespace: ws-alice-lab
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workspace-heartbeat
+  namespace: ws-alice-lab
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workspace-heartbeat
+  namespace: ws-alice-lab
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+subjects:
+- kind: ServiceAccount
+  name: workspace
+  namespace: ws-alice-lab
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workspace-heartbeat
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workspace-developer
+  namespace: ws-alice-lab
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+subjects:
+- kind: User
+  name: alice@corp.example
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workspace-developer
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-ingress
+  namespace: ws-alice-lab
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-egress
+  namespace: ws-alice-lab
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector: {}
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.244.0.0/16
+        - 10.96.0.0/12
+        - 169.254.169.254/32

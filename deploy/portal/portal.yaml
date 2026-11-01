@@ -1,0 +1,126 @@
+# The portal runs as a ServiceAccount whose only cluster power is to
+# *impersonate* developers. Every API call it makes carries
+# "Impersonate-User: <developer>", so RBAC is evaluated for the developer, not
+# for the portal — the portal can never do more than kubectl would let that
+# person do. Identity comes from the authenticating proxy in front of it.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: workspace-portal
+  namespace: devspaces-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workspace-portal-impersonator
+rules:
+  - apiGroups: [""]
+    resources: ["users", "groups"]
+    verbs: ["impersonate"]
+  # readiness probe only
+  - nonResourceURLs: ["/version"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: workspace-portal-impersonator
+subjects:
+  - kind: ServiceAccount
+    name: workspace-portal
+    namespace: devspaces-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workspace-portal-impersonator
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: workspace-portal-artifactory
+  namespace: devspaces-system
+type: Opaque
+stringData:
+  # Read-only token used only to LIST images and check tool downloads for the
+  # Tools page. Developers' own tokens (Profile page) live in their namespaces.
+  token: "replace-me-or-leave-empty"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workspace-portal
+  namespace: devspaces-system
+  labels: { app.kubernetes.io/name: workspace-portal }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app.kubernetes.io/name: workspace-portal }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: workspace-portal }
+    spec:
+      serviceAccountName: workspace-portal
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: portal
+          image: ghcr.io/example/devspaces/workspace-portal:2026.10
+          args:
+            - -addr=:8080
+            # identity headers set by oauth2-proxy (see ingress-oauth2-proxy.yaml)
+            - -user-header=X-Forwarded-Email
+            - -groups-header=X-Forwarded-Groups
+            # only the ingress/proxy pods may assert identity; tighten to your proxy's pod CIDR
+            - -trusted-proxies=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+            # developers in this group see the hardware/kernel profiles (optional)
+            # - -lab-group=devspaces:lab-users
+          env:
+            - name: ARTIFACTORY_TOKEN
+              valueFrom:
+                secretKeyRef: { name: workspace-portal-artifactory, key: token, optional: true }
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: workspace-portal
+  namespace: devspaces-system
+spec:
+  selector: { app.kubernetes.io/name: workspace-portal }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# Nobody but the auth proxy may reach the portal pods: an identity header from
+# any other source would be trusted otherwise.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workspace-portal-ingress
+  namespace: devspaces-system
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: workspace-portal }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: oauth2-proxy }
+      ports:
+        - { port: 8080, protocol: TCP }
