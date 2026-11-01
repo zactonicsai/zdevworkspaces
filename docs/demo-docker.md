@@ -39,15 +39,6 @@ from the unpacked repository folder (`devspaces/`) unless stated otherwise.
 | VS Code + *Remote - SSH* extension (optional) | current | | <https://code.visualstudio.com/docs/remote/ssh> |
 | Go 1.22+ (optional, only to run the portal from source) | 1.22 | `go version` | <https://go.dev/dl/> |
 
-Check that Docker runs and which Linux kernel it uses (this matters later for user namespaces):
-
-```bash
-docker run --rm alpine:3.20 uname -r
-```
-You should see a version such as `6.10.14-linuxkit` (Docker Desktop) or your Linux kernel.
-**6.3 or newer** is needed for the default *user namespace* isolation; older kernels still
-work with a one-line fallback described in [Troubleshooting](#troubleshooting).
-
 ### 0.3 Get the code
 
 Unzip `devspaces.zip` and go into the folder:
@@ -58,7 +49,24 @@ ls
 #  README.md  cli/  deploy/  docs/  images/  portal/
 ```
 
-### 0.4 Make an SSH key (once)
+### 0.4 Run the checker
+
+One script tests everything in the table, plus Docker's memory, disk space, free ports,
+network reachability of the download sites, and the Linux kernel Docker uses:
+
+```bash
+./deploy/demo/check-prereqs.sh              # expects the kind tools (Level 2)
+./deploy/demo/check-prereqs.sh --level 1    # Docker-only demo: kind/kubectl are optional
+```
+Each line is `PASS`, `WARN` (advisory) or `FAIL` (fix before continuing) with the command
+or link that fixes it. The kernel line matters later: **6.3 or newer** is needed for the
+default *user namespace* isolation; older kernels still work with a one-line fallback
+described in [Troubleshooting](#troubleshooting). Run the script again at any time —
+once the kind cluster exists it also verifies the live environment (nodes, lab taint,
+platform, portal, loaded images) and runs a small probe pod to prove `hostUsers: false`
+works on your machine (`--no-probe` skips that).
+
+### 0.5 Make an SSH key (once)
 
 Workspaces accept SSH keys, never passwords. If `ls ~/.ssh/id_ed25519.pub` prints a file
 name, you already have one. Otherwise:
@@ -418,6 +426,52 @@ Images stay on your machine; `docker rmi $(docker images 'workspace/*' -q)` remo
 
 ---
 
+## Seeing which cluster you are on, and what runs there
+
+`kubectl` always talks to the **current context** in `~/.kube/config`. Several clusters
+(kind, a cloud cluster, production) can live in that one file; the context decides which
+one your commands hit, so check it before anything else:
+
+```bash
+kubectl config current-context            # e.g. kind-devspaces
+kubectl config get-contexts               # every cluster you can talk to; * marks the current one
+kubectl config use-context kind-devspaces # switch
+kubectl cluster-info                      # API server address of the current cluster
+kubectl get nodes -o wide                 # machines in the cluster, their roles, versions, IPs
+kubectl get namespaces                    # ws-<user> are workspace areas, devspaces-system is the platform
+kubectl get pods -A -o wide               # every pod on the cluster, with the node it runs on
+kubectl -n ws-demo get pods,statefulsets,pvc,svc       # one developer's workspaces
+kubectl -n ws-demo describe pod ws-go-0   # why a pod is Pending/CrashLooping (read "Events" at the bottom)
+kubectl -n ws-demo logs ws-go-0 -f        # boot log of a workspace, live
+kubectl get events -A --sort-by=.lastTimestamp | tail -20
+```
+
+The same, summarized, from the workspace CLI (works against **any** cluster your kubectl
+can reach, not only kind):
+
+```bash
+./cli/workspace cluster               # context, server, nodes, platform health, workspace namespaces + pods
+./cli/workspace cluster --contexts    # also list all kubeconfig contexts
+./cli/workspace cluster --mine        # only your namespace(s)
+./cli/workspace cluster -A            # also dump every pod on the cluster
+```
+
+Tools worth having (all in the catalog, tick them when creating a workspace, or install
+them on your laptop):
+
+| Tool | What it does | Laptop install |
+|---|---|---|
+| **k9s** | full-screen terminal UI: browse clusters, namespaces, pods, logs, shells (`:ctx` to switch cluster, `:ns` namespace, `l` logs, `s` shell) | <https://k9scli.io/topics/install/> |
+| **kubectx / kubens** | `kubectx` lists/switches clusters, `kubens ws-demo` sets the default namespace | <https://github.com/ahmetb/kubectx#installation> |
+| **stern** | `stern -n ws-demo .` tails logs from every pod matching a pattern, color-coded | <https://github.com/stern/stern#installation> |
+| **kubecolor** | `alias kubectl=kubecolor` — the same output, readable | <https://kubecolor.github.io/setup/install/> |
+| **Headlamp** or **Lens** (desktop apps) | point-and-click view of clusters, nodes and pods using your kubeconfig | <https://headlamp.dev/> · <https://k8slens.dev/> |
+
+Inside a workspace, `kubectl` (from the `kubectl` tool) uses the pod's own service account,
+which may only touch its own pod. To look at the cluster from inside a workspace, copy your
+laptop's kubeconfig there (`scp ~/.kube/config ws-go:~/.kube/config`) — or just use the
+laptop.
+
 ## Level 3 (optional) — Put a real Artifactory in the loop
 
 Artifactory OSS is free and runs as one container. The OSS edition only has *Generic*
@@ -464,6 +518,9 @@ and npm repositories need the Pro edition).
 | `kind load` takes very long | images are 1–2 GB each | normal; load only the languages you need |
 | Apple silicon: a tool fails to download | the project publishes no arm64 asset | check the URL in the boot log; most catalog tools do have arm64 builds |
 | `./images/build.sh` fails in `npm` | Node is missing | harmless; the committed `tailwind.css` is used |
+
+First thing to try for any problem: `./deploy/demo/check-prereqs.sh` — it verifies the
+machine and, when the cluster exists, the platform, portal, images and user-namespace support.
 
 Where to look: `./cli/workspace status NAME`, `./cli/workspace logs NAME`,
 `kubectl -n ws-demo describe pod ws-NAME-0`, `kubectl -n devspaces-system logs deploy/workspace-portal`,

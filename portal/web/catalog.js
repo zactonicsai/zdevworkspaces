@@ -353,6 +353,62 @@ window.DEMO_CATALOG = {
     ]
    }
   },
+  "kubectx": {
+   "category": "kubernetes",
+   "description": "kubectx + kubens — switch clusters and namespaces quickly",
+   "docs": "https://github.com/ahmetb/kubectx#readme",
+   "artifact": {
+    "repo": "github",
+    "path": "ahmetb/kubectx/releases/download/v{version}/kubectx_v{version}_linux_{arch_alt}.tar.gz",
+    "version": "0.9.5",
+    "install": "tar",
+    "bin": [
+     "kubectx"
+    ]
+   }
+  },
+  "kubens": {
+   "category": "kubernetes",
+   "description": "kubens — switch the current namespace",
+   "docs": "https://github.com/ahmetb/kubectx#readme",
+   "artifact": {
+    "repo": "github",
+    "path": "ahmetb/kubectx/releases/download/v{version}/kubens_v{version}_linux_{arch_alt}.tar.gz",
+    "version": "0.9.5",
+    "install": "tar",
+    "bin": [
+     "kubens"
+    ]
+   }
+  },
+  "stern": {
+   "category": "kubernetes",
+   "description": "stern — tail logs from many pods at once",
+   "docs": "https://github.com/stern/stern#readme",
+   "artifact": {
+    "repo": "github",
+    "path": "stern/stern/releases/download/v{version}/stern_{version}_linux_{goarch}.tar.gz",
+    "version": "1.32.0",
+    "install": "tar",
+    "bin": [
+     "stern"
+    ]
+   }
+  },
+  "kubecolor": {
+   "category": "kubernetes",
+   "description": "kubecolor — colorized kubectl output",
+   "docs": "https://kubecolor.github.io/",
+   "artifact": {
+    "repo": "github",
+    "path": "kubecolor/kubecolor/releases/download/v{version}/kubecolor_{version}_linux_{goarch}.tar.gz",
+    "version": "0.5.0",
+    "install": "tar",
+    "bin": [
+     "kubecolor"
+    ]
+   }
+  },
   "k9s": {
    "category": "kubernetes",
    "description": "k9s — terminal UI for Kubernetes",

@@ -7,6 +7,7 @@ goes through `kubectl`, so your kubeconfig, contexts, auth plugins and RBAC
 apply exactly as they do on the command line.
 
   workspace create --lang rust --tools cmake,git
+  workspace cluster                   # which cluster/context am I on, nodes, workspaces, pods
   workspace ssh rust                  # or in VS Code: Remote-SSH → "ws-rust"
   workspace code rust                 # opens VS Code on /workspace
   workspace stop rust                 # pod removed, home volume kept
@@ -1064,6 +1065,66 @@ def cmd_catalog(args, k: Kube) -> int:
     return 0
 
 
+def cmd_cluster(args, k: Kube) -> int:
+    """Which cluster am I talking to, and what is running on it?"""
+    ctx = k.run(["config", "current-context"], ns=NO_NS, check=False).stdout.strip() or "(none)"
+    server = k.run(["config", "view", "--minify", "-o", "jsonpath={.clusters[0].cluster.server}"], ns=NO_NS, check=False).stdout.strip()
+    who = k.whoami() or "?"
+    ver = k.run(["version", "-o", "json"], ns=NO_NS, check=False)
+    sver = "?"
+    if ver.returncode == 0:
+        try:
+            sver = json.loads(ver.stdout).get("serverVersion", {}).get("gitVersion", "?")
+        except json.JSONDecodeError:
+            pass
+    print(f"context   {ctx}")
+    print(f"server    {server or '?'}   kubernetes {sver}")
+    print(f"you are   {who}")
+    if args.contexts:
+        print("\ncontexts (kubectl config use-context NAME to switch)")
+        print(k.run(["config", "get-contexts"], ns=NO_NS, check=False).stdout.rstrip())
+    nodes = k.get("nodes", ns=NO_NS) or {"items": []}
+    print(f"\nnodes ({len(nodes['items'])})")
+    for n in nodes["items"]:
+        m, st = n["metadata"], n.get("status", {})
+        ready = next((c["status"] for c in st.get("conditions", []) if c["type"] == "Ready"), "Unknown")
+        roles = ",".join(l.split("/", 1)[1] for l in m.get("labels", {}) if l.startswith("node-role.kubernetes.io/")) or "worker"
+        lab = "  [lab pool]" if m.get("labels", {}).get("devspaces.io/lab") == "true" else ""
+        ni = st.get("nodeInfo", {})
+        print(f"  {m['name']:32} {'Ready' if ready == 'True' else 'NotReady':9} {roles:14} {ni.get('kubeletVersion', '?'):10} {ni.get('architecture', '?'):6} {ni.get('containerRuntimeVersion', '')}{lab}")
+    sysns = k.get("deployments", ns=SYSTEM_NS) or {}
+    if sysns.get("items"):
+        print(f"\nplatform ({SYSTEM_NS})")
+        for d in sysns["items"]:
+            print(f"  deploy/{d['metadata']['name']:28} {d.get('status', {}).get('readyReplicas', 0)}/{d['spec'].get('replicas', 0)} ready")
+        for cj in (k.get("cronjobs", ns=SYSTEM_NS) or {}).get("items", []):
+            print(f"  cronjob/{cj['metadata']['name']:27} schedule {cj['spec'].get('schedule')}  last run {cj.get('status', {}).get('lastScheduleTime', '-')}")
+    else:
+        print(f"\nplatform: namespace {SYSTEM_NS} not found on this cluster (kubectl apply -k deploy/platform)")
+    tenants = (k.get("namespaces", ns=NO_NS, selector=LABEL_TENANT) or {}).get("items", [])
+    tenants = [t for t in tenants if not args.mine or t["metadata"]["name"] == resolve_namespace(args, k)] if args.mine else tenants
+    print(f"\nworkspace namespaces ({len(tenants)})")
+    if not tenants:
+        print("  none — workspace admin onboard <user>")
+    for t in tenants:
+        ns = t["metadata"]["name"]
+        tier = t["metadata"].get("labels", {}).get(LABEL_TIER, "?")
+        pods = (k.get("pods", ns=ns) or {}).get("items", [])
+        sts = (k.get("statefulsets", ns=ns, selector=LABEL_WS) or {}).get("items", [])
+        print(f"  {ns:28} tier={tier:9} workspaces={len(sts)} pods={len(pods)}")
+        for p in pods:
+            st = p["status"]
+            ready = sum(1 for c in st.get("containerStatuses", []) if c.get("ready"))
+            total = len(p["spec"].get("containers", []))
+            restarts = sum(c.get("restartCount", 0) for c in st.get("containerStatuses", []))
+            waiting = next((c["state"]["waiting"].get("reason") for c in st.get("containerStatuses", []) if c.get("state", {}).get("waiting")), "")
+            print(f"      pod/{p['metadata']['name']:24} {st.get('phase', '?'):10} {ready}/{total} ready  restarts={restarts}  node={p['spec'].get('nodeName', '-')}  {waiting}")
+    if args.all:
+        print("\nall pods (kubectl get pods -A)")
+        print(k.run(["get", "pods", "-A", "-o", "wide"], ns=NO_NS, check=False).stdout.rstrip())
+    return 0
+
+
 def cmd_admin_onboard(args, k: Kube) -> int:
     cat = load_catalog(k)
     user = sanitize_user(args.user)
@@ -1198,6 +1259,10 @@ def build_parser() -> argparse.ArgumentParser:
     sc = add("ssh-config", cmd_ssh_config, "(re)write the ~/.ssh/config entry, e.g. on a second machine"); sc.add_argument("name"); sc.add_argument("--git-agent", action="store_true")
     idl = add("idle", cmd_idle, "change the auto-stop timeout"); idl.add_argument("name"); idl.add_argument("duration", help="e.g. 8h, 30m, off")
     ct = add("catalog", cmd_catalog, "show languages, tools and profiles"); ct.add_argument("--json", action="store_true")
+    cl = add("cluster", cmd_cluster, "which cluster kubectl points at: nodes, platform, workspace namespaces and pods")
+    cl.add_argument("--contexts", action="store_true", help="also list every kubeconfig context")
+    cl.add_argument("--mine", action="store_true", help="only my namespace(s)")
+    cl.add_argument("-A", "--all", action="store_true", help="also dump every pod on the cluster (kubectl get pods -A -o wide)")
 
     a = sub.add_parser("admin", help="platform-admin commands")
     asub = a.add_subparsers(dest="admin_cmd", required=True)

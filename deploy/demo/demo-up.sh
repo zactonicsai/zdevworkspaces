@@ -14,19 +14,11 @@ DEMO_USER=${DEMO_USER:-demo@example.com}
 export REGISTRY=workspace TAG=dev
 
 step() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
-need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1 — $2"; exit 1; }; }
 
-step "0/7 Checking prerequisites"
-need docker  "https://docs.docker.com/get-docker/"
-need kind    "https://kind.sigs.k8s.io/docs/user/quick-start/#installation"
-need kubectl "https://kubernetes.io/docs/tasks/tools/"
-need python3 "the workspace CLI is a Python 3.9+ script"
-need ssh-keygen "part of the OpenSSH client"
-docker info >/dev/null 2>&1 || { echo "Docker is not running."; exit 1; }
-kernel=$(docker run --rm alpine:3.20 uname -r 2>/dev/null || echo "unknown")
-echo "Docker's Linux kernel: $kernel  (user namespaces need >= 6.3; see the troubleshooting section otherwise)"
-mem=$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0)
-[ "$mem" -ge 6000000000 ] 2>/dev/null || echo "note: Docker has $((mem / 1024 / 1024 / 1024)) GB of memory; 8 GB is comfortable for 3 nodes + workspaces"
+step "0/7 Checking prerequisites (deploy/demo/check-prereqs.sh)"
+if ! ./deploy/demo/check-prereqs.sh --level 2 --no-probe; then
+  echo; echo "Fix the FAIL items above and run again (SKIP_CHECKS=1 to bypass)."; [ "${SKIP_CHECKS:-0}" = 1 ] || exit 1
+fi
 
 step "1/7 Creating the kind cluster '$CLUSTER' (control-plane + worker + lab worker)"
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
@@ -63,7 +55,8 @@ else
   echo "run:  sudo install -m 755 cli/workspace /usr/local/bin/workspace   (or use ./cli/workspace)"
 fi
 
-step "7/7 Done. Next steps"
+step "7/7 Verifying the environment"
+./deploy/demo/check-prereqs.sh --level 2 --offline || true
 cat <<EOF
 
   Portal (as $DEMO_USER):

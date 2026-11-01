@@ -311,7 +311,8 @@ one-per-node anti-affinity. For kernel work that may panic, use `kernel` (Kata) 
 
 ## 11. Try it on your laptop first
 
-`docs/demo-docker.md` is a step-by-step walkthrough that needs nothing but Docker:
+`docs/demo-docker.md` is a step-by-step walkthrough that needs nothing but Docker
+(`./deploy/demo/check-prereqs.sh` tells you whether your machine is ready):
 Level 1 runs the portal (demo mode) and one real workspace container via Compose;
 Level 2 runs the complete system — platform, portal, CLI, lab node, reaper, admission
 guardrails — on a 3-node kind cluster (`./deploy/demo/demo-up.sh`); Level 3 adds a real
@@ -344,6 +345,7 @@ Day-2: `workspace list -A`, `workspace admin reap -A --dry-run`, bump `catalog.j
 ## 13. Developer quick reference
 
 ```bash
+workspace cluster                                   # which cluster am I on: nodes, platform, workspaces, pods
 workspace catalog                                   # what you can ask for
 workspace create --lang go,python --tools kubectl,protobuf,ripgrep --repo git@github.com:acme/api.git
 workspace create ml --lang python --size 100Gi --memory 32Gi --cpu 8

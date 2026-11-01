@@ -4,6 +4,7 @@ Step-by-step instructions: **[docs/demo-docker.md](../../docs/demo-docker.md)**.
 
 | File | Used by |
 |---|---|
+| `check-prereqs.sh` | Before anything: checks tools, Docker resources, kernel, ports, network; verifies the live cluster once it exists (`--level 1`, `--no-probe`, `--offline`) |
 | `docker-compose.yaml` | Level 1: portal in mock mode + one workspace container (`ssh -p 2222 dev@localhost`) |
 | `make-ssh-keys.sh` | Level 1: creates `ssh/` (host key + your authorized key) for the container |
 | `kind-config.yaml` | Level 2: 3-node kind cluster, Kubernetes 1.36.4, one node tainted as the hardware lab pool |
