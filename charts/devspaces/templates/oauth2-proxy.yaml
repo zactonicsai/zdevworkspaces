@@ -1,0 +1,82 @@
+{{- if and .Values.portal.enabled .Values.oauth2Proxy.enabled }}
+# Sign-in in front of the portal. Any OIDC provider works (Okta, Entra ID, Keycloak, Google…).
+# The e-mail claim must match how the API server names users (--oidc-username-claim=email).
+{{- if not .Values.oauth2Proxy.existingSecret }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oauth2-proxy
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+stringData:
+  client-id: {{ .Values.oauth2Proxy.clientId | quote }}
+  client-secret: {{ .Values.oauth2Proxy.clientSecret | quote }}
+  cookie-secret: {{ .Values.oauth2Proxy.cookieSecret | quote }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy
+  namespace: {{ .Release.Namespace }}
+  labels: { app.kubernetes.io/name: oauth2-proxy }
+spec:
+  replicas: {{ .Values.oauth2Proxy.replicas }}
+  selector:
+    matchLabels: { app.kubernetes.io/name: oauth2-proxy }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: oauth2-proxy }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 2000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: oauth2-proxy
+          image: {{ .Values.oauth2Proxy.image }}
+          args:
+            - --provider=oidc
+            - --oidc-issuer-url={{ .Values.oauth2Proxy.issuerUrl }}
+            - --email-domain={{ .Values.oauth2Proxy.emailDomain }}
+            - --upstream=http://workspace-portal.{{ .Release.Namespace }}.svc/
+            - --http-address=0.0.0.0:4180
+            - --cookie-secure=true
+            - --cookie-samesite=lax
+            - --cookie-refresh=1h
+            - --set-xauthrequest=true
+            - --pass-user-headers=true
+            - --pass-access-token=false
+            - --skip-provider-button=true
+            - --oidc-groups-claim={{ .Values.oauth2Proxy.groupsClaim }}
+            {{- range .Values.oauth2Proxy.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: OAUTH2_PROXY_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: {{ .Values.oauth2Proxy.existingSecret | default "oauth2-proxy" }}, key: client-id } }
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: {{ .Values.oauth2Proxy.existingSecret | default "oauth2-proxy" }}, key: client-secret } }
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom: { secretKeyRef: { name: {{ .Values.oauth2Proxy.existingSecret | default "oauth2-proxy" }}, key: cookie-secret } }
+          ports:
+            - { name: http, containerPort: 4180 }
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app.kubernetes.io/name: oauth2-proxy }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+{{- end }}

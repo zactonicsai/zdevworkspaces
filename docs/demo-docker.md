@@ -5,6 +5,7 @@ only Docker. You will end up with:
 
 | Level | What you get | Needs | Time |
 |---|---|---|---|
+| **0 — Static simulation** | one HTML file that pretends to be the whole system: create workspaces, watch them boot, stop/start them, type into a simulated shell. Saved in your browser only | a web browser | 2 min |
 | **1 — Docker only** | the web portal (demo mode) and one real workspace container you can `ssh` into and open in VS Code | Docker | ~15 min (most of it image building) |
 | **2 — Full system on kind** | a real Kubernetes cluster in Docker running the platform, the portal, the CLI, hardware-lab node, idle reaper, admission guardrails | Docker + kind + kubectl | ~30 min |
 | **3 — Optional: real Artifactory** | tool downloads go through a JFrog Artifactory OSS container | Level 2 | ~15 min |
@@ -12,8 +13,34 @@ only Docker. You will end up with:
 Every step says what to type, what it does, and what you should see. Commands are run
 from the unpacked repository folder (`devspaces/`) unless stated otherwise.
 
-> **Shortcut.** `./deploy/demo/demo-up.sh` runs all of Level 2 for you and prints the
-> next steps. Read the steps below at least once anyway: they explain what each piece is.
+> **Shortcuts.** `./deploy/demo/demo-up.sh` runs all of Level 2 for you and prints the
+> next steps. Afterwards (or after a reboot) `./deploy/demo/demo-start.sh` brings the
+> portal and the other services back up, skipping whatever is already running
+> (`status` reports, `stop` stops). Read the steps below at least once anyway: they
+> explain what each piece is.
+
+---
+
+## Level 0 — The static simulation (no Docker, no install)
+
+Open **`portal/web/simulation.html`** in any browser (double-click it, or
+`./deploy/demo/demo-start.sh sim`). It is a single file with no server behind it:
+
+* **Create** a workspace with several languages and tools and a repository URL, then
+  watch it go Pending → Starting → Running with a boot log like the real entrypoint's.
+* **Open & shell**: a simulated SSH terminal. Try `help`, `ls -a`, `go version`,
+  `cat ~/workspace/<repo>/main.go`, `echo hi > ~/keep.txt`, `sudo apt install cowsay`.
+* **Stop**, then press Enter in the terminal: the workspace auto-starts (as the real SSH
+  ProxyCommand does). `cat ~/keep.txt` is still there; `cowsay` is gone — the same
+  persistence rule as the real volume (`/home/dev` survives, the image does not).
+* Set the **idle timeout** to 1 minute and leave it: the simulated **reaper** stops it,
+  visible on the *Events* page.
+* **Theme** switches light/dark; **Reset demo** forgets everything. State lives in
+  `localStorage` under the key `ws.sim`, so nothing leaves your browser.
+
+The *How it works* tab maps every simulated piece to the real one (StatefulSet, PVC,
+reaper CronJob, Multus/Cilium multicast, lab node). When the real portal is running, the
+same page is also served at `http://localhost:8080/simulation.html`.
 
 ---
 

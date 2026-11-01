@@ -602,9 +602,13 @@ window.DEMO_CATALOG = {
    "169.254.169.254/32"
   ],
   "multicast": {
-   "$comment": "NetworkAttachmentDefinition attached when --multicast is given; see deploy/platform/networking/",
+   "$comment": "mode=multus: a second interface (net1) from the NetworkAttachmentDefinition below. mode=cilium: Cilium's eBPF multicast datapath on the pod's normal interface (VXLAN tunnel mode, kernel >= 5.10 amd64 / 6.0 arm64, beta); `groups` are programmed cluster-wide by deploy/cluster/multicast-cilium.sh. --multicast works the same way for developers in both modes.",
+   "mode": "multus",
    "nad": "devspaces-system/mcast",
-   "iface": "net1"
+   "iface": "net1",
+   "groups": [
+    "239.255.0.0/24"
+   ]
   }
  }
 };

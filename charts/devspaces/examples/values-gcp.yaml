@@ -1,0 +1,27 @@
+# GCP GKE starting point. Pair with deploy/cluster/providers/gcp-gke.sh.
+global:
+  registry: us-docker.pkg.dev/my-project/devspaces   # Artifact Registry, or your Artifactory
+  tag: "2026.10"
+  pullSecretName: ""
+catalogOverrides:
+  artifactory:
+    url: https://artifactory.corp.example/artifactory
+  defaults: { storageClass: standard-rwo }            # pd-balanced, expansion enabled
+  networking:
+    clusterCIDRs: ["10.4.0.0/14", "10.8.0.0/20"]      # pod + service ranges of the cluster
+    blockedEgress: ["169.254.169.254/32"]
+multicast:
+  mode: cilium                 # GKE Dataplane V2 is Cilium-based but managed; for the multicast beta run OSS Cilium (see guide)
+ingress:
+  className: gce
+  host: workspaces.corp.example
+  annotations:
+    networking.gke.io/managed-certificates: workspaces-cert
+    kubernetes.io/ingress.allow-http: "false"
+  tls: { enabled: false }
+oauth2Proxy:
+  issuerUrl: https://accounts.google.com
+  emailDomain: corp.example
+  existingSecret: oauth2-proxy
+portal:
+  trustedProxies: "10.4.0.0/14"

@@ -5,7 +5,8 @@
   "scripts": {
     "build:css": "tailwindcss -c tailwind.config.js -i web/tailwind.src.css -o web/tailwind.css --minify",
     "watch:css": "tailwindcss -c tailwind.config.js -i web/tailwind.src.css -o web/tailwind.css --watch",
-    "gen:catalog": "node -e \"const c=require('./catalog.default.json');require('fs').writeFileSync('web/catalog.js','/* generated from deploy/platform/catalog.json by build.sh — used only by demo.js when no API is reachable */\\nwindow.DEMO_CATALOG = '+JSON.stringify(c,null,1)+';\\n')\""
+    "gen:catalog": "node -e \"const c=require('./catalog.default.json');require('fs').writeFileSync('web/catalog.js','/* generated from deploy/platform/catalog.json by build.sh \u2014 used only by demo.js when no API is reachable */\\nwindow.DEMO_CATALOG = '+JSON.stringify(c,null,1)+';\\n')\"",
+    "build:sim": "tailwindcss -c tailwind.sim.config.js -i web/tailwind.src.css -o /tmp/sim.css --minify && node -e \"const fs=require('fs');const css=fs.readFileSync('/tmp/sim.css','utf8');const f='web/simulation.html';let h=fs.readFileSync(f,'utf8');h=h.replace(/<style id=\\\"tw\\\">[\\s\\S]*?<\\/style>/,'<style id=\\\"tw\\\">'+css.replace(/\\$/g,'$$$$')+'</style>');fs.writeFileSync(f,h)\""
   },
   "devDependencies": {
     "tailwindcss": "^3.4.17"

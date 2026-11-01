@@ -1,27 +1,24 @@
 {
-  "$comment": "Source of truth for what developers may build, shared by the CLI and the web portal. kustomize publishes it as ConfigMap devspaces-system/workspace-catalog. Admins add a language or tool here (plus images/features/<name>/install.sh, or just an `artifact` block for something downloadable from Artifactory) — no CLI/portal release needed.",
-
+  "$comment": "Source of truth for what developers may build, shared by the CLI and the web portal. kustomize publishes it as ConfigMap devspaces-system/workspace-catalog. Admins add a language or tool here (plus images/features/<name>/install.sh, or just an `artifact` block for something downloadable from Artifactory) \u2014 no CLI/portal release needed.",
   "registry": "artifactory.example.com/devspaces-docker",
   "tag": "2026.10",
   "pullSecret": "artifactory-pull",
-
   "artifactory": {
-    "$comment": "Everything a workspace downloads comes from here. `url` is the Artifactory base (…/artifactory). Repos are names of remote/virtual repositories you create; leave one empty to skip configuring that package manager. The portal lists images and tool versions through the Artifactory REST API; workspaces pull packages through these repos (configure-artifactory at boot).",
+    "$comment": "Everything a workspace downloads comes from here. `url` is the Artifactory base (\u2026/artifactory). Repos are names of remote/virtual repositories you create; leave one empty to skip configuring that package manager. The portal lists images and tool versions through the Artifactory REST API; workspaces pull packages through these repos (configure-artifactory at boot).",
     "url": "https://artifactory.example.com/artifactory",
     "repos": {
-      "docker":  "devspaces-docker",
+      "docker": "devspaces-docker",
       "generic": "devspaces-generic",
-      "github":  "github-remote",
-      "apt":     "ubuntu-remote",
-      "pypi":    "pypi-remote",
-      "npm":     "npm-remote",
-      "go":      "go-remote",
-      "maven":   "maven-remote",
-      "cargo":   "cargo-remote"
+      "github": "github-remote",
+      "apt": "ubuntu-remote",
+      "pypi": "pypi-remote",
+      "npm": "npm-remote",
+      "go": "go-remote",
+      "maven": "maven-remote",
+      "cargo": "cargo-remote"
     },
     "docs": "https://jfrog.com/help/r/jfrog-artifactory-documentation"
   },
-
   "defaults": {
     "profile": "standard",
     "isolation": "userns",
@@ -34,84 +31,445 @@
     "storageClass": "",
     "idleTimeout": "4h"
   },
-
   "languages": {
-    "base":   { "image": "workspace-base",   "label": "No language (bare Linux)", "description": "Ubuntu 24.04 with compilers, git and ssh — add languages as tools", "docs": "https://ubuntu.com/server/docs" },
-    "python": { "image": "workspace-python", "label": "Python",  "description": "Python 3 with pip, venv, pipx and uv", "docs": "https://docs.python.org/3/", "learn": "https://docs.python.org/3/tutorial/" },
-    "go":     { "image": "workspace-go",     "label": "Go",      "description": "Go toolchain (latest stable) with module cache on your volume", "docs": "https://go.dev/doc/", "learn": "https://go.dev/tour/" },
-    "rust":   { "image": "workspace-rust",   "label": "Rust",    "description": "Rust stable via rustup, cargo, clippy, rust-analyzer", "docs": "https://doc.rust-lang.org/", "learn": "https://doc.rust-lang.org/book/" },
-    "java":   { "image": "workspace-java",   "label": "Java",    "description": "OpenJDK 21 with Maven and Gradle", "docs": "https://docs.oracle.com/en/java/javase/21/", "learn": "https://dev.java/learn/" },
-    "node":   { "image": "workspace-node",   "label": "Node.js", "description": "Node.js LTS with npm, pnpm and yarn (corepack)", "docs": "https://nodejs.org/docs/latest/api/", "learn": "https://nodejs.org/en/learn" },
-    "cpp":    { "image": "workspace-cpp",    "label": "C / C++", "description": "GCC and Clang, CMake, Ninja, GDB, Valgrind, clangd", "docs": "https://en.cppreference.com/", "learn": "https://isocpp.org/get-started" }
+    "base": {
+      "image": "workspace-base",
+      "label": "No language (bare Linux)",
+      "description": "Ubuntu 24.04 with compilers, git and ssh \u2014 add languages as tools",
+      "docs": "https://ubuntu.com/server/docs"
+    },
+    "python": {
+      "image": "workspace-python",
+      "label": "Python",
+      "description": "Python 3 with pip, venv, pipx and uv",
+      "docs": "https://docs.python.org/3/",
+      "learn": "https://docs.python.org/3/tutorial/"
+    },
+    "go": {
+      "image": "workspace-go",
+      "label": "Go",
+      "description": "Go toolchain (latest stable) with module cache on your volume",
+      "docs": "https://go.dev/doc/",
+      "learn": "https://go.dev/tour/"
+    },
+    "rust": {
+      "image": "workspace-rust",
+      "label": "Rust",
+      "description": "Rust stable via rustup, cargo, clippy, rust-analyzer",
+      "docs": "https://doc.rust-lang.org/",
+      "learn": "https://doc.rust-lang.org/book/"
+    },
+    "java": {
+      "image": "workspace-java",
+      "label": "Java",
+      "description": "OpenJDK 21 with Maven and Gradle",
+      "docs": "https://docs.oracle.com/en/java/javase/21/",
+      "learn": "https://dev.java/learn/"
+    },
+    "node": {
+      "image": "workspace-node",
+      "label": "Node.js",
+      "description": "Node.js LTS with npm, pnpm and yarn (corepack)",
+      "docs": "https://nodejs.org/docs/latest/api/",
+      "learn": "https://nodejs.org/en/learn"
+    },
+    "cpp": {
+      "image": "workspace-cpp",
+      "label": "C / C++",
+      "description": "GCC and Clang, CMake, Ninja, GDB, Valgrind, clangd",
+      "docs": "https://en.cppreference.com/",
+      "learn": "https://isocpp.org/get-started"
+    }
   },
-
   "tools": {
-    "git":        { "builtin": true, "category": "source control", "description": "git + git-lfs (always present)", "docs": "https://git-scm.com/doc" },
-    "cmake":      { "category": "build", "description": "CMake + Ninja build system", "docs": "https://cmake.org/documentation/" },
-    "gdb":        { "category": "debug", "description": "gdb, lldb, strace, ltrace, valgrind", "docs": "https://sourceware.org/gdb/documentation/" },
-    "docker-cli": { "category": "containers", "description": "docker CLI + buildx + compose (daemon: DOCKER_HOST or a lab-tier dind sidecar)", "docs": "https://docs.docker.com/reference/cli/docker/" },
-    "kubectl":    { "category": "kubernetes", "description": "kubectl + helm", "docs": "https://kubernetes.io/docs/reference/kubectl/" },
-    "protobuf":   { "category": "build", "description": "protoc + gRPC plugins", "docs": "https://protobuf.dev/" },
-    "mcast":      { "category": "networking", "description": "multicast test kit: iperf, smcroute, tcpdump, socat, mcast-check", "docs": "https://www.rfc-editor.org/rfc/rfc1112" },
-    "python":     { "category": "language", "description": "add Python 3 to a workspace built from another language image", "docs": "https://docs.python.org/3/" },
-    "go":         { "category": "language", "description": "add Go", "docs": "https://go.dev/doc/" },
-    "rust":       { "category": "language", "description": "add Rust", "docs": "https://doc.rust-lang.org/" },
-    "node":       { "category": "language", "description": "add Node.js", "docs": "https://nodejs.org/docs/latest/api/" },
-    "java":       { "category": "language", "description": "add OpenJDK, Maven and Gradle", "docs": "https://dev.java/" },
-    "cpp":        { "category": "language", "description": "add the C/C++ toolchain", "docs": "https://gcc.gnu.org/onlinedocs/" },
-
-    "ripgrep":        { "category": "shell", "description": "rg — very fast text search across a repo", "docs": "https://github.com/BurntSushi/ripgrep#readme",
-                        "artifact": { "repo": "github", "path": "BurntSushi/ripgrep/releases/download/{version}/ripgrep-{version}-{triple}.tar.gz", "version": "14.1.1", "install": "tar", "strip": 1, "bin": ["rg"] } },
-    "fd":             { "category": "shell", "description": "fd — friendly alternative to find", "docs": "https://github.com/sharkdp/fd#readme",
-                        "artifact": { "repo": "github", "path": "sharkdp/fd/releases/download/v{version}/fd-v{version}-{triple}.tar.gz", "version": "10.2.0", "install": "tar", "strip": 1, "bin": ["fd"] } },
-    "bat":            { "category": "shell", "description": "bat — cat with syntax highlighting", "docs": "https://github.com/sharkdp/bat#readme",
-                        "artifact": { "repo": "github", "path": "sharkdp/bat/releases/download/v{version}/bat-v{version}-{triple}.tar.gz", "version": "0.25.0", "install": "tar", "strip": 1, "bin": ["bat"] } },
-    "fzf":            { "category": "shell", "description": "fzf — fuzzy finder for the terminal", "docs": "https://github.com/junegunn/fzf#readme",
-                        "artifact": { "repo": "github", "path": "junegunn/fzf/releases/download/v{version}/fzf-{version}-linux_{goarch}.tar.gz", "version": "0.60.3", "install": "tar", "bin": ["fzf"] } },
-    "yq":             { "category": "shell", "description": "yq — jq for YAML", "docs": "https://mikefarah.gitbook.io/yq",
-                        "artifact": { "repo": "github", "path": "mikefarah/yq/releases/download/v{version}/yq_linux_{goarch}", "version": "4.45.1", "install": "binary", "bin": ["yq"] } },
-    "gh":             { "category": "source control", "description": "GitHub CLI — pull requests and issues from the terminal", "docs": "https://cli.github.com/manual/",
-                        "artifact": { "repo": "github", "path": "cli/cli/releases/download/v{version}/gh_{version}_linux_{goarch}.tar.gz", "version": "2.74.0", "install": "tar", "strip": 1, "bin": ["bin/gh"] } },
-    "lazygit":        { "category": "source control", "description": "lazygit — terminal UI for git", "docs": "https://github.com/jesseduffield/lazygit#readme",
-                        "artifact": { "repo": "github", "path": "jesseduffield/lazygit/releases/download/v{version}/lazygit_{version}_Linux_{arch_alt}.tar.gz", "version": "0.50.0", "install": "tar", "bin": ["lazygit"] } },
-    "delta":          { "category": "source control", "description": "delta — readable git diffs", "docs": "https://dandavison.github.io/delta/",
-                        "artifact": { "repo": "github", "path": "dandavison/delta/releases/download/{version}/delta-{version}-{triple}.tar.gz", "version": "0.18.2", "install": "tar", "strip": 1, "bin": ["delta"] } },
-    "shellcheck":     { "category": "quality", "description": "ShellCheck — finds bugs in shell scripts", "docs": "https://www.shellcheck.net/wiki/",
-                        "artifact": { "repo": "github", "path": "koalaman/shellcheck/releases/download/v{version}/shellcheck-v{version}.linux.{arch}.tar.xz", "version": "0.10.0", "install": "tar", "strip": 1, "bin": ["shellcheck"] } },
-    "hadolint":       { "category": "quality", "description": "hadolint — Dockerfile linter", "docs": "https://github.com/hadolint/hadolint#readme",
-                        "artifact": { "repo": "github", "path": "hadolint/hadolint/releases/download/v{version}/hadolint-Linux-{arch_alt}", "version": "2.12.0", "install": "binary", "bin": ["hadolint"] } },
-    "golangci-lint":  { "category": "quality", "description": "golangci-lint — Go linters runner", "docs": "https://golangci-lint.run/",
-                        "artifact": { "repo": "github", "path": "golangci/golangci-lint/releases/download/v{version}/golangci-lint-{version}-linux-{goarch}.tar.gz", "version": "2.1.6", "install": "tar", "strip": 1, "bin": ["golangci-lint"] } },
-    "buf":            { "category": "build", "description": "buf — modern protobuf tooling", "docs": "https://buf.build/docs/",
-                        "artifact": { "repo": "github", "path": "bufbuild/buf/releases/download/v{version}/buf-Linux-{arch}", "version": "1.54.0", "install": "binary", "bin": ["buf"] } },
-    "just":           { "category": "build", "description": "just — a command runner (like make, simpler)", "docs": "https://just.systems/man/en/",
-                        "artifact": { "repo": "github", "path": "casey/just/releases/download/{version}/just-{version}-{triple}.tar.gz", "version": "1.40.0", "install": "tar", "bin": ["just"] } },
-    "hyperfine":      { "category": "debug", "description": "hyperfine — command-line benchmarking", "docs": "https://github.com/sharkdp/hyperfine#readme",
-                        "artifact": { "repo": "github", "path": "sharkdp/hyperfine/releases/download/v{version}/hyperfine-v{version}-{triple}.tar.gz", "version": "1.19.0", "install": "tar", "strip": 1, "bin": ["hyperfine"] } },
-    "kubectx":        { "category": "kubernetes", "description": "kubectx + kubens — switch clusters and namespaces quickly", "docs": "https://github.com/ahmetb/kubectx#readme",
-                        "artifact": { "repo": "github", "path": "ahmetb/kubectx/releases/download/v{version}/kubectx_v{version}_linux_{arch_alt}.tar.gz", "version": "0.9.5", "install": "tar", "bin": ["kubectx"] } },
-    "kubens":         { "category": "kubernetes", "description": "kubens — switch the current namespace", "docs": "https://github.com/ahmetb/kubectx#readme",
-                        "artifact": { "repo": "github", "path": "ahmetb/kubectx/releases/download/v{version}/kubens_v{version}_linux_{arch_alt}.tar.gz", "version": "0.9.5", "install": "tar", "bin": ["kubens"] } },
-    "stern":          { "category": "kubernetes", "description": "stern — tail logs from many pods at once", "docs": "https://github.com/stern/stern#readme",
-                        "artifact": { "repo": "github", "path": "stern/stern/releases/download/v{version}/stern_{version}_linux_{goarch}.tar.gz", "version": "1.32.0", "install": "tar", "bin": ["stern"] } },
-    "kubecolor":      { "category": "kubernetes", "description": "kubecolor — colorized kubectl output", "docs": "https://kubecolor.github.io/",
-                        "artifact": { "repo": "github", "path": "kubecolor/kubecolor/releases/download/v{version}/kubecolor_{version}_linux_{goarch}.tar.gz", "version": "0.5.0", "install": "tar", "bin": ["kubecolor"] } },
-    "k9s":            { "category": "kubernetes", "description": "k9s — terminal UI for Kubernetes", "docs": "https://k9scli.io/",
-                        "artifact": { "repo": "github", "path": "derailed/k9s/releases/download/v{version}/k9s_Linux_{goarch}.tar.gz", "version": "0.50.6", "install": "tar", "bin": ["k9s"] } },
-    "direnv":         { "category": "shell", "description": "direnv — per-directory environment variables", "docs": "https://direnv.net/",
-                        "artifact": { "repo": "github", "path": "direnv/direnv/releases/download/v{version}/direnv.linux-{goarch}", "version": "2.36.0", "install": "binary", "bin": ["direnv"] } },
-    "duckdb":         { "category": "data", "description": "DuckDB — in-process analytics database CLI", "docs": "https://duckdb.org/docs/",
-                        "artifact": { "repo": "github", "path": "duckdb/duckdb/releases/download/v{version}/duckdb_cli-linux-{goarch}.zip", "version": "1.3.0", "install": "zip", "bin": ["duckdb"] } }
+    "git": {
+      "builtin": true,
+      "category": "source control",
+      "description": "git + git-lfs (always present)",
+      "docs": "https://git-scm.com/doc"
+    },
+    "cmake": {
+      "category": "build",
+      "description": "CMake + Ninja build system",
+      "docs": "https://cmake.org/documentation/"
+    },
+    "gdb": {
+      "category": "debug",
+      "description": "gdb, lldb, strace, ltrace, valgrind",
+      "docs": "https://sourceware.org/gdb/documentation/"
+    },
+    "docker-cli": {
+      "category": "containers",
+      "description": "docker CLI + buildx + compose (daemon: DOCKER_HOST or a lab-tier dind sidecar)",
+      "docs": "https://docs.docker.com/reference/cli/docker/"
+    },
+    "kubectl": {
+      "category": "kubernetes",
+      "description": "kubectl + helm",
+      "docs": "https://kubernetes.io/docs/reference/kubectl/"
+    },
+    "protobuf": {
+      "category": "build",
+      "description": "protoc + gRPC plugins",
+      "docs": "https://protobuf.dev/"
+    },
+    "mcast": {
+      "category": "networking",
+      "description": "multicast test kit: iperf, smcroute, tcpdump, socat, mcast-check",
+      "docs": "https://www.rfc-editor.org/rfc/rfc1112"
+    },
+    "python": {
+      "category": "language",
+      "description": "add Python 3 to a workspace built from another language image",
+      "docs": "https://docs.python.org/3/"
+    },
+    "go": {
+      "category": "language",
+      "description": "add Go",
+      "docs": "https://go.dev/doc/"
+    },
+    "rust": {
+      "category": "language",
+      "description": "add Rust",
+      "docs": "https://doc.rust-lang.org/"
+    },
+    "node": {
+      "category": "language",
+      "description": "add Node.js",
+      "docs": "https://nodejs.org/docs/latest/api/"
+    },
+    "java": {
+      "category": "language",
+      "description": "add OpenJDK, Maven and Gradle",
+      "docs": "https://dev.java/"
+    },
+    "cpp": {
+      "category": "language",
+      "description": "add the C/C++ toolchain",
+      "docs": "https://gcc.gnu.org/onlinedocs/"
+    },
+    "ripgrep": {
+      "category": "shell",
+      "description": "rg \u2014 very fast text search across a repo",
+      "docs": "https://github.com/BurntSushi/ripgrep#readme",
+      "artifact": {
+        "repo": "github",
+        "path": "BurntSushi/ripgrep/releases/download/{version}/ripgrep-{version}-{triple}.tar.gz",
+        "version": "14.1.1",
+        "install": "tar",
+        "strip": 1,
+        "bin": [
+          "rg"
+        ]
+      }
+    },
+    "fd": {
+      "category": "shell",
+      "description": "fd \u2014 friendly alternative to find",
+      "docs": "https://github.com/sharkdp/fd#readme",
+      "artifact": {
+        "repo": "github",
+        "path": "sharkdp/fd/releases/download/v{version}/fd-v{version}-{triple}.tar.gz",
+        "version": "10.2.0",
+        "install": "tar",
+        "strip": 1,
+        "bin": [
+          "fd"
+        ]
+      }
+    },
+    "bat": {
+      "category": "shell",
+      "description": "bat \u2014 cat with syntax highlighting",
+      "docs": "https://github.com/sharkdp/bat#readme",
+      "artifact": {
+        "repo": "github",
+        "path": "sharkdp/bat/releases/download/v{version}/bat-v{version}-{triple}.tar.gz",
+        "version": "0.25.0",
+        "install": "tar",
+        "strip": 1,
+        "bin": [
+          "bat"
+        ]
+      }
+    },
+    "fzf": {
+      "category": "shell",
+      "description": "fzf \u2014 fuzzy finder for the terminal",
+      "docs": "https://github.com/junegunn/fzf#readme",
+      "artifact": {
+        "repo": "github",
+        "path": "junegunn/fzf/releases/download/v{version}/fzf-{version}-linux_{goarch}.tar.gz",
+        "version": "0.60.3",
+        "install": "tar",
+        "bin": [
+          "fzf"
+        ]
+      }
+    },
+    "yq": {
+      "category": "shell",
+      "description": "yq \u2014 jq for YAML",
+      "docs": "https://mikefarah.gitbook.io/yq",
+      "artifact": {
+        "repo": "github",
+        "path": "mikefarah/yq/releases/download/v{version}/yq_linux_{goarch}",
+        "version": "4.45.1",
+        "install": "binary",
+        "bin": [
+          "yq"
+        ]
+      }
+    },
+    "gh": {
+      "category": "source control",
+      "description": "GitHub CLI \u2014 pull requests and issues from the terminal",
+      "docs": "https://cli.github.com/manual/",
+      "artifact": {
+        "repo": "github",
+        "path": "cli/cli/releases/download/v{version}/gh_{version}_linux_{goarch}.tar.gz",
+        "version": "2.74.0",
+        "install": "tar",
+        "strip": 1,
+        "bin": [
+          "bin/gh"
+        ]
+      }
+    },
+    "lazygit": {
+      "category": "source control",
+      "description": "lazygit \u2014 terminal UI for git",
+      "docs": "https://github.com/jesseduffield/lazygit#readme",
+      "artifact": {
+        "repo": "github",
+        "path": "jesseduffield/lazygit/releases/download/v{version}/lazygit_{version}_Linux_{arch_alt}.tar.gz",
+        "version": "0.50.0",
+        "install": "tar",
+        "bin": [
+          "lazygit"
+        ]
+      }
+    },
+    "delta": {
+      "category": "source control",
+      "description": "delta \u2014 readable git diffs",
+      "docs": "https://dandavison.github.io/delta/",
+      "artifact": {
+        "repo": "github",
+        "path": "dandavison/delta/releases/download/{version}/delta-{version}-{triple}.tar.gz",
+        "version": "0.18.2",
+        "install": "tar",
+        "strip": 1,
+        "bin": [
+          "delta"
+        ]
+      }
+    },
+    "shellcheck": {
+      "category": "quality",
+      "description": "ShellCheck \u2014 finds bugs in shell scripts",
+      "docs": "https://www.shellcheck.net/wiki/",
+      "artifact": {
+        "repo": "github",
+        "path": "koalaman/shellcheck/releases/download/v{version}/shellcheck-v{version}.linux.{arch}.tar.xz",
+        "version": "0.10.0",
+        "install": "tar",
+        "strip": 1,
+        "bin": [
+          "shellcheck"
+        ]
+      }
+    },
+    "hadolint": {
+      "category": "quality",
+      "description": "hadolint \u2014 Dockerfile linter",
+      "docs": "https://github.com/hadolint/hadolint#readme",
+      "artifact": {
+        "repo": "github",
+        "path": "hadolint/hadolint/releases/download/v{version}/hadolint-Linux-{arch_alt}",
+        "version": "2.12.0",
+        "install": "binary",
+        "bin": [
+          "hadolint"
+        ]
+      }
+    },
+    "golangci-lint": {
+      "category": "quality",
+      "description": "golangci-lint \u2014 Go linters runner",
+      "docs": "https://golangci-lint.run/",
+      "artifact": {
+        "repo": "github",
+        "path": "golangci/golangci-lint/releases/download/v{version}/golangci-lint-{version}-linux-{goarch}.tar.gz",
+        "version": "2.1.6",
+        "install": "tar",
+        "strip": 1,
+        "bin": [
+          "golangci-lint"
+        ]
+      }
+    },
+    "buf": {
+      "category": "build",
+      "description": "buf \u2014 modern protobuf tooling",
+      "docs": "https://buf.build/docs/",
+      "artifact": {
+        "repo": "github",
+        "path": "bufbuild/buf/releases/download/v{version}/buf-Linux-{arch}",
+        "version": "1.54.0",
+        "install": "binary",
+        "bin": [
+          "buf"
+        ]
+      }
+    },
+    "just": {
+      "category": "build",
+      "description": "just \u2014 a command runner (like make, simpler)",
+      "docs": "https://just.systems/man/en/",
+      "artifact": {
+        "repo": "github",
+        "path": "casey/just/releases/download/{version}/just-{version}-{triple}.tar.gz",
+        "version": "1.40.0",
+        "install": "tar",
+        "bin": [
+          "just"
+        ]
+      }
+    },
+    "hyperfine": {
+      "category": "debug",
+      "description": "hyperfine \u2014 command-line benchmarking",
+      "docs": "https://github.com/sharkdp/hyperfine#readme",
+      "artifact": {
+        "repo": "github",
+        "path": "sharkdp/hyperfine/releases/download/v{version}/hyperfine-v{version}-{triple}.tar.gz",
+        "version": "1.19.0",
+        "install": "tar",
+        "strip": 1,
+        "bin": [
+          "hyperfine"
+        ]
+      }
+    },
+    "kubectx": {
+      "category": "kubernetes",
+      "description": "kubectx + kubens \u2014 switch clusters and namespaces quickly",
+      "docs": "https://github.com/ahmetb/kubectx#readme",
+      "artifact": {
+        "repo": "github",
+        "path": "ahmetb/kubectx/releases/download/v{version}/kubectx_v{version}_linux_{arch_alt}.tar.gz",
+        "version": "0.9.5",
+        "install": "tar",
+        "bin": [
+          "kubectx"
+        ]
+      }
+    },
+    "kubens": {
+      "category": "kubernetes",
+      "description": "kubens \u2014 switch the current namespace",
+      "docs": "https://github.com/ahmetb/kubectx#readme",
+      "artifact": {
+        "repo": "github",
+        "path": "ahmetb/kubectx/releases/download/v{version}/kubens_v{version}_linux_{arch_alt}.tar.gz",
+        "version": "0.9.5",
+        "install": "tar",
+        "bin": [
+          "kubens"
+        ]
+      }
+    },
+    "stern": {
+      "category": "kubernetes",
+      "description": "stern \u2014 tail logs from many pods at once",
+      "docs": "https://github.com/stern/stern#readme",
+      "artifact": {
+        "repo": "github",
+        "path": "stern/stern/releases/download/v{version}/stern_{version}_linux_{goarch}.tar.gz",
+        "version": "1.32.0",
+        "install": "tar",
+        "bin": [
+          "stern"
+        ]
+      }
+    },
+    "kubecolor": {
+      "category": "kubernetes",
+      "description": "kubecolor \u2014 colorized kubectl output",
+      "docs": "https://kubecolor.github.io/",
+      "artifact": {
+        "repo": "github",
+        "path": "kubecolor/kubecolor/releases/download/v{version}/kubecolor_{version}_linux_{goarch}.tar.gz",
+        "version": "0.5.0",
+        "install": "tar",
+        "bin": [
+          "kubecolor"
+        ]
+      }
+    },
+    "k9s": {
+      "category": "kubernetes",
+      "description": "k9s \u2014 terminal UI for Kubernetes",
+      "docs": "https://k9scli.io/",
+      "artifact": {
+        "repo": "github",
+        "path": "derailed/k9s/releases/download/v{version}/k9s_Linux_{goarch}.tar.gz",
+        "version": "0.50.6",
+        "install": "tar",
+        "bin": [
+          "k9s"
+        ]
+      }
+    },
+    "direnv": {
+      "category": "shell",
+      "description": "direnv \u2014 per-directory environment variables",
+      "docs": "https://direnv.net/",
+      "artifact": {
+        "repo": "github",
+        "path": "direnv/direnv/releases/download/v{version}/direnv.linux-{goarch}",
+        "version": "2.36.0",
+        "install": "binary",
+        "bin": [
+          "direnv"
+        ]
+      }
+    },
+    "duckdb": {
+      "category": "data",
+      "description": "DuckDB \u2014 in-process analytics database CLI",
+      "docs": "https://duckdb.org/docs/",
+      "artifact": {
+        "repo": "github",
+        "path": "duckdb/duckdb/releases/download/v{version}/duckdb_cli-linux-{goarch}.zip",
+        "version": "1.3.0",
+        "install": "zip",
+        "bin": [
+          "duckdb"
+        ]
+      }
+    }
   },
-
   "profiles": {
     "standard": {
       "label": "Standard",
       "description": "Default. root inside a user namespace, Pod Security 'baseline', no host access.",
       "tier": "standard",
       "capabilities": [
-        "AUDIT_WRITE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "MKNOD",
-        "NET_BIND_SERVICE", "SETFCAP", "SETGID", "SETPCAP", "SETUID", "SYS_CHROOT"
+        "AUDIT_WRITE",
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+        "FSETID",
+        "KILL",
+        "MKNOD",
+        "NET_BIND_SERVICE",
+        "SETFCAP",
+        "SETGID",
+        "SETPCAP",
+        "SETUID",
+        "SYS_CHROOT"
       ]
     },
     "hardware": {
@@ -120,10 +478,21 @@
       "tier": "lab",
       "privileged": true,
       "isolation": "none",
-      "hostPaths": ["/lib/modules", "/usr/src", "/lib/firmware"],
-      "nodeSelector": { "devspaces.io/lab": "true" },
+      "hostPaths": [
+        "/lib/modules",
+        "/usr/src",
+        "/lib/firmware"
+      ],
+      "nodeSelector": {
+        "devspaces.io/lab": "true"
+      },
       "tolerations": [
-        { "key": "devspaces.io/lab", "operator": "Equal", "value": "true", "effect": "NoSchedule" }
+        {
+          "key": "devspaces.io/lab",
+          "operator": "Equal",
+          "value": "true",
+          "effect": "NoSchedule"
+        }
       ],
       "exclusiveNode": true
     },
@@ -133,46 +502,112 @@
       "tier": "lab",
       "isolation": "kata",
       "capabilities": [
-        "AUDIT_WRITE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "MKNOD",
-        "NET_ADMIN", "NET_BIND_SERVICE", "NET_RAW", "SETFCAP", "SETGID", "SETPCAP", "SETUID",
-        "SYS_ADMIN", "SYS_CHROOT", "SYS_MODULE", "SYS_PTRACE", "SYS_RAWIO", "IPC_LOCK"
+        "AUDIT_WRITE",
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+        "FSETID",
+        "KILL",
+        "MKNOD",
+        "NET_ADMIN",
+        "NET_BIND_SERVICE",
+        "NET_RAW",
+        "SETFCAP",
+        "SETGID",
+        "SETPCAP",
+        "SETUID",
+        "SYS_ADMIN",
+        "SYS_CHROOT",
+        "SYS_MODULE",
+        "SYS_PTRACE",
+        "SYS_RAWIO",
+        "IPC_LOCK"
       ],
-      "nodeSelector": { "devspaces.io/lab": "true" },
+      "nodeSelector": {
+        "devspaces.io/lab": "true"
+      },
       "tolerations": [
-        { "key": "devspaces.io/lab", "operator": "Equal", "value": "true", "effect": "NoSchedule" }
+        {
+          "key": "devspaces.io/lab",
+          "operator": "Equal",
+          "value": "true",
+          "effect": "NoSchedule"
+        }
       ],
       "exclusiveNode": false
     }
   },
-
   "isolation": {
-    "userns": { "hostUsers": false,
-                "description": "Linux user namespace (K8s >= 1.36 GA; kernel >= 6.3). Container root maps to an unprivileged host UID." },
-    "gvisor": { "runtimeClass": "gvisor",
-                "description": "gVisor (runsc) syscall sandbox. No userns needed; limited multicast/raw-socket support." },
-    "kata":   { "runtimeClass": "kata",
-                "description": "Kata Containers micro-VM with its own guest kernel." },
-    "none":   { "description": "Plain runc, shared kernel, host UIDs. Lab tier only." }
+    "userns": {
+      "hostUsers": false,
+      "description": "Linux user namespace (K8s >= 1.36 GA; kernel >= 6.3). Container root maps to an unprivileged host UID."
+    },
+    "gvisor": {
+      "runtimeClass": "gvisor",
+      "description": "gVisor (runsc) syscall sandbox. No userns needed; limited multicast/raw-socket support."
+    },
+    "kata": {
+      "runtimeClass": "kata",
+      "description": "Kata Containers micro-VM with its own guest kernel."
+    },
+    "none": {
+      "description": "Plain runc, shared kernel, host UIDs. Lab tier only."
+    }
   },
-
   "devices": {
     "$comment": "Shown as choices in the portal's hardware step; any resource=quantity still works on the CLI.",
-    "nvidia.com/gpu":            { "label": "NVIDIA GPU",            "quantity": "1",    "docs": "https://github.com/NVIDIA/k8s-device-plugin#readme" },
-    "smarter-devices/ttyUSB0":   { "label": "USB serial (ttyUSB0)",  "quantity": "1",    "docs": "https://gitlab.com/arm-research/smarter/smarter-device-manager" },
-    "smarter-devices/ttyACM0":   { "label": "USB CDC serial (ttyACM0)", "quantity": "1", "docs": "https://gitlab.com/arm-research/smarter/smarter-device-manager" },
-    "smarter-devices/i2c-1":     { "label": "I2C bus 1",             "quantity": "1",    "docs": "https://www.kernel.org/doc/html/latest/i2c/dev-interface.html" },
-    "smarter-devices/video0":    { "label": "Camera (video0)",       "quantity": "1",    "docs": "https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/v4l2.html" },
-    "intel.com/sriov_netdevice": { "label": "SR-IOV network VF",     "quantity": "1",    "docs": "https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin#readme" },
-    "hugepages-2Mi":             { "label": "Hugepages 2Mi (DPDK)",  "quantity": "1Gi",  "docs": "https://kubernetes.io/docs/tasks/manage-hugepages/scheduling-hugepages/" }
+    "nvidia.com/gpu": {
+      "label": "NVIDIA GPU",
+      "quantity": "1",
+      "docs": "https://github.com/NVIDIA/k8s-device-plugin#readme"
+    },
+    "smarter-devices/ttyUSB0": {
+      "label": "USB serial (ttyUSB0)",
+      "quantity": "1",
+      "docs": "https://gitlab.com/arm-research/smarter/smarter-device-manager"
+    },
+    "smarter-devices/ttyACM0": {
+      "label": "USB CDC serial (ttyACM0)",
+      "quantity": "1",
+      "docs": "https://gitlab.com/arm-research/smarter/smarter-device-manager"
+    },
+    "smarter-devices/i2c-1": {
+      "label": "I2C bus 1",
+      "quantity": "1",
+      "docs": "https://www.kernel.org/doc/html/latest/i2c/dev-interface.html"
+    },
+    "smarter-devices/video0": {
+      "label": "Camera (video0)",
+      "quantity": "1",
+      "docs": "https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/v4l2.html"
+    },
+    "intel.com/sriov_netdevice": {
+      "label": "SR-IOV network VF",
+      "quantity": "1",
+      "docs": "https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin#readme"
+    },
+    "hugepages-2Mi": {
+      "label": "Hugepages 2Mi (DPDK)",
+      "quantity": "1Gi",
+      "docs": "https://kubernetes.io/docs/tasks/manage-hugepages/scheduling-hugepages/"
+    }
   },
-
   "networking": {
-    "clusterCIDRs": ["10.244.0.0/16", "10.96.0.0/12"],
-    "blockedEgress": ["169.254.169.254/32"],
+    "clusterCIDRs": [
+      "10.244.0.0/16",
+      "10.96.0.0/12"
+    ],
+    "blockedEgress": [
+      "169.254.169.254/32"
+    ],
     "multicast": {
-      "$comment": "NetworkAttachmentDefinition attached when --multicast is given; see deploy/platform/networking/",
+      "$comment": "mode=multus: a second interface (net1) from the NetworkAttachmentDefinition below. mode=cilium: Cilium's eBPF multicast datapath on the pod's normal interface (VXLAN tunnel mode, kernel >= 5.10 amd64 / 6.0 arm64, beta); `groups` are programmed cluster-wide by deploy/cluster/multicast-cilium.sh. --multicast works the same way for developers in both modes.",
+      "mode": "multus",
       "nad": "devspaces-system/mcast",
-      "iface": "net1"
+      "iface": "net1",
+      "groups": [
+        "239.255.0.0/24"
+      ]
     }
   }
 }

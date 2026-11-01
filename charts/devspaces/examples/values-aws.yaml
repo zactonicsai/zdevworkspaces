@@ -1,0 +1,29 @@
+# AWS EKS starting point. Pair with deploy/cluster/providers/aws-eks.sh.
+global:
+  registry: 123456789012.dkr.ecr.us-east-1.amazonaws.com/devspaces   # or your Artifactory
+  tag: "2026.10"
+  pullSecretName: ""          # ECR via the node IAM role needs no pull secret; set when using Artifactory
+catalogOverrides:
+  artifactory:
+    url: https://artifactory.corp.example/artifactory
+  defaults: { storageClass: gp3 }             # ebs-csi StorageClass with allowVolumeExpansion
+  networking:
+    clusterCIDRs: ["10.0.0.0/16", "172.20.0.0/16"]   # VPC CIDR + service CIDR
+    blockedEgress: ["169.254.169.254/32"]            # IMDS
+multicast:
+  mode: cilium                 # VPCs do not forward multicast; Cilium's eBPF datapath replicates it over VXLAN
+  groups: ["239.255.0.0/24"]
+ingress:
+  className: alb                # or nginx behind an NLB
+  host: workspaces.corp.example
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internal
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/REPLACE
+  tls: { enabled: false }       # TLS terminates on the ALB
+oauth2Proxy:
+  issuerUrl: https://login.microsoftonline.com/TENANT-ID/v2.0   # example: Entra ID
+  emailDomain: corp.example
+  existingSecret: oauth2-proxy   # create it: kubectl -n devspaces-system create secret generic oauth2-proxy --from-literal=client-id=… --from-literal=client-secret=… --from-literal=cookie-secret=…
+portal:
+  trustedProxies: "10.0.0.0/16"

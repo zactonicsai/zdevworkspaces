@@ -421,9 +421,13 @@ func renderWorkspace(in renderInputs, r *resolved, cat *Catalog) []Obj {
 		gitAuthMode = "ssh"
 	}
 	artifacts, _ := json.Marshal(artifactSpecs(cat, r.Tools))
+	mcMode := strings.ToLower(orDefault(str(cat.Networking, "multicast", "mode"), "multus"))
 	mcIface := ""
 	if r.Multicast {
-		mcIface = str(cat.Networking, "multicast", "iface")
+		mcIface = orDefault(str(cat.Networking, "multicast", "iface"), "net1")
+		if mcMode == "cilium" { // eBPF datapath: multicast flows on the pod's normal interface
+			mcIface = "eth0"
+		}
 	}
 	listen := "127.0.0.1"
 	if r.Expose {
@@ -588,7 +592,7 @@ func renderWorkspace(in renderInputs, r *resolved, cat *Catalog) []Obj {
 		podSpec["imagePullSecrets"] = []any{Obj{"name": cat.PullSecret}}
 	}
 	tplMeta := Obj{"labels": deepCopy(lbl)}
-	if r.Multicast {
+	if r.Multicast && mcMode == "multus" { // cilium mode needs no extra interface
 		tplMeta["annotations"] = Obj{annNetworks: str(cat.Networking, "multicast", "nad")}
 	}
 	specJSON, _ := json.Marshal(r)

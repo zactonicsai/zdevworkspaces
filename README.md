@@ -105,6 +105,10 @@ deploy/platform/                kubectl apply -k   (installed once per cluster)
 deploy/examples/                rendered output for four workspace variants, a tenant, the platform
 deploy/portal/                  portal Deployment, impersonation RBAC (base/), oauth2-proxy + Ingress example
 deploy/demo/                    Docker Compose + kind overlay for a laptop demo (docs/demo-docker.md)
+deploy/cluster/                 production cluster layer: CONTRACT.md, check-contract.sh, providers/, addons.sh, multicast-cilium.sh
+deploy/prod/                    production phase scripts: images, helm install, onboarding, smoke test
+charts/devspaces/               Helm chart for the Kubernetes layer (+ examples/values-{aws,gcp,azure,onprem}.yaml)
+docs/production-deployment.md   phased, provider-agnostic production guide
 docs/demo-docker.md             step-by-step demo guide
 portal/                         Go API + web UI (see portal/README.md)
 ```
@@ -313,12 +317,25 @@ one-per-node anti-affinity. For kernel work that may panic, use `kernel` (Kata) 
 
 `docs/demo-docker.md` is a step-by-step walkthrough that needs nothing but Docker
 (`./deploy/demo/check-prereqs.sh` tells you whether your machine is ready):
-Level 1 runs the portal (demo mode) and one real workspace container via Compose;
+Level 0 is `portal/web/simulation.html`, a single static page that simulates the whole
+flow — create, boot log, a shell in the browser, stop/start persistence, the reaper —
+with localStorage as its "cluster"; Level 1 runs the portal (demo mode) and one real workspace container via Compose;
 Level 2 runs the complete system — platform, portal, CLI, lab node, reaper, admission
 guardrails — on a 3-node kind cluster (`./deploy/demo/demo-up.sh`); Level 3 adds a real
-Artifactory OSS container for the tool-download path.
+Artifactory OSS container for the tool-download path. After that, `./deploy/demo/demo-start.sh`
+(`start|status|stop|sim`) brings the portal and services back up, skipping whatever already runs.
 
-## 12. Platform install (admin)
+## 12. Production on any cloud (two layers)
+
+`docs/production-deployment.md` is the phased production guide: a **cluster layer** with one
+recipe per provider (`deploy/cluster/providers/` — EKS, GKE, AKS, VMware/kubeadm), a written
+**contract** between the layers (`deploy/cluster/CONTRACT.md`, verified by
+`check-contract.sh`), provider-agnostic add-ons (`addons.sh`, Cilium eBPF multicast via
+`multicast-cilium.sh`), and the **Kubernetes layer** as a Helm chart (`charts/devspaces`,
+example values per provider) driven by `deploy/prod/10…40` scripts. The quickstart below is
+the short form of Phase 3.
+
+## 13. Platform install (admin)
 
 ```bash
 # 1. Node prerequisites: K8s ≥ 1.36 (userns GA) or ≥ 1.33 with the gate, kernel ≥ 6.3,
@@ -342,7 +359,7 @@ Day-2: `workspace list -A`, `workspace admin reap -A --dry-run`, bump `catalog.j
 `tag` to roll images (next start of each workspace picks it up), add tools through the
 `workspace-features` ConfigMap, snapshot PVCs with your CSI driver's VolumeSnapshot.
 
-## 13. Developer quick reference
+## 14. Developer quick reference
 
 ```bash
 workspace cluster                                   # which cluster am I on: nodes, platform, workspaces, pods
@@ -359,7 +376,7 @@ workspace ssh-config go     # on a second laptop
 workspace stop go · workspace start go · workspace delete go [--purge]
 ```
 
-## 14. Web portal
+## 15. Web portal
 
 `portal/` is a single Go binary (standard library only) that serves a vanilla-JS,
 Tailwind-styled single-page app and a JSON API. It renders **the same Kubernetes objects
@@ -394,7 +411,7 @@ as the CLI** (a test compares the two), so portal and CLI can manage each other'
 
 Run: `cd portal && go run . -mock` → http://localhost:8080. Deploy: `kubectl apply -k deploy/portal`.
 
-## 15. Artifactory: all resources from one place
+## 16. Artifactory: all resources from one place
 
 `catalog.json → artifactory` names the Artifactory base URL and one repository per
 ecosystem (`docker`, `generic`, `github`, `apt`, `pypi`, `npm`, `go`, `maven`, `cargo`).
@@ -409,7 +426,7 @@ With that in place:
 | Credentials | per-developer token in `workspace-profile` (portal Profile page or `kubectl create secret`), injected as `ARTIFACTORY_TOKEN`; a netrc at `/run/workspace/netrc` serves curl, pip, Go and git |
 | Portal catalog | lists images/tags and checks tool availability through the Artifactory REST API (read-only token) |
 
-## 16. Known limits and trade-offs
+## 17. Known limits and trade-offs
 
 * `hostUsers: false` + NFS home volumes do not work (no idmap support in the NFS client);
   use block storage or `--isolation gvisor`.

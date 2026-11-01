@@ -1,0 +1,132 @@
+{{- if .Values.portal.enabled }}
+# The portal impersonates the signed-in developer towards the API server; its own
+# ServiceAccount can only `impersonate`. Identity comes from the auth proxy in front of it.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: workspace-portal
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workspace-portal-impersonator
+rules:
+  - apiGroups: [""]
+    resources: ["users", "groups"]
+    verbs: ["impersonate"]
+  - nonResourceURLs: ["/version"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: workspace-portal-impersonator
+subjects:
+  - kind: ServiceAccount
+    name: workspace-portal
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workspace-portal-impersonator
+{{- if and (not .Values.portal.existingSecret) .Values.portal.artifactoryToken }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: workspace-portal-artifactory
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+stringData:
+  token: {{ .Values.portal.artifactoryToken | quote }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workspace-portal
+  namespace: {{ .Release.Namespace }}
+  labels: { app.kubernetes.io/name: workspace-portal }
+spec:
+  replicas: {{ .Values.portal.replicas }}
+  selector:
+    matchLabels: { app.kubernetes.io/name: workspace-portal }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: workspace-portal }
+      annotations:
+        checksum/catalog: {{ .Values.catalogOverrides | toJson | sha256sum }}
+    spec:
+      serviceAccountName: workspace-portal
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: portal
+          image: {{ .Values.portal.image | default (printf "%s/workspace-portal:%s" .Values.global.registry .Values.global.tag) }}
+          args:
+            - -addr=:8080
+            - -user-header={{ .Values.portal.userHeader }}
+            - -groups-header={{ .Values.portal.groupsHeader }}
+            - -trusted-proxies={{ .Values.portal.trustedProxies }}
+            {{- if .Values.portal.labGroup }}
+            - -lab-group={{ .Values.portal.labGroup }}
+            {{- end }}
+            {{- if .Values.portal.csp }}
+            - -csp={{ .Values.portal.csp }}
+            {{- end }}
+          env:
+            - name: ARTIFACTORY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.portal.existingSecret | default "workspace-portal-artifactory" }}
+                  key: token
+                  optional: true
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 30
+          resources:
+{{ toYaml .Values.portal.resources | indent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: workspace-portal
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app.kubernetes.io/name: workspace-portal }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+{{- if .Values.networkPolicy.enabled }}
+---
+# Nobody but the auth proxy may reach the portal pods (an identity header from any other
+# source would be trusted otherwise).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workspace-portal-ingress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: workspace-portal }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: oauth2-proxy }
+      ports:
+        - { port: 8080, protocol: TCP }
+{{- end }}
+{{- end }}

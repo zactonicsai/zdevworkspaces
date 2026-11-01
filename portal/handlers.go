@@ -755,6 +755,10 @@ func (s *server) authenticate(next http.Handler) http.Handler {
 	})
 }
 
+// simulationCSP applies only to /simulation.html: inline code allowed, no network at all.
+const simulationCSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+	"img-src data:; font-src data:; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+
 func securityHeaders(csp string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -763,7 +767,14 @@ func securityHeaders(csp string, next http.Handler) http.Handler {
 		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		if csp != "" {
-			h.Set("Content-Security-Policy", csp)
+			if r.URL.Path == "/simulation.html" {
+				// The standalone simulation page is one self-contained file (inline
+				// script + inlined Tailwind) so it also works from file://. It never
+				// talks to the API, so it gets its own, offline-only policy.
+				h.Set("Content-Security-Policy", simulationCSP)
+			} else {
+				h.Set("Content-Security-Policy", csp)
+			}
 		}
 		next.ServeHTTP(w, r)
 	})

@@ -339,3 +339,14 @@ func TestHTTPLifecycle(t *testing.T) {
 		t.Fatalf("catalog: %d %v", code, body["languagesOrder"])
 	}
 }
+
+func TestSimulationCSP(t *testing.T) {
+	h := securityHeaders(defaultCSP, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	for path, want := range map[string]string{"/simulation.html": simulationCSP, "/": defaultCSP, "/app.js": defaultCSP} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if got := rec.Header().Get("Content-Security-Policy"); got != want {
+			t.Errorf("%s: CSP = %q, want %q", path, got, want)
+		}
+	}
+}

@@ -1,0 +1,25 @@
+# Azure AKS starting point. Pair with deploy/cluster/providers/azure-aks.sh.
+global:
+  registry: myregistry.azurecr.io/devspaces          # ACR (AKS pulls via managed identity), or Artifactory
+  tag: "2026.10"
+  pullSecretName: ""
+catalogOverrides:
+  artifactory:
+    url: https://artifactory.corp.example/artifactory
+  defaults: { storageClass: managed-csi-premium }
+  networking:
+    clusterCIDRs: ["10.244.0.0/16", "10.0.0.0/16"]
+    blockedEgress: ["169.254.169.254/32"]
+multicast:
+  mode: cilium                 # AKS "Azure CNI powered by Cilium" is managed; use BYO Cilium for the multicast beta
+ingress:
+  className: webapprouting.kubernetes.azure.com   # AKS app routing add-on (nginx), or your own nginx
+  host: workspaces.corp.example
+  annotations: {}
+  tls: { enabled: true, secretName: workspaces-tls }
+oauth2Proxy:
+  issuerUrl: https://login.microsoftonline.com/TENANT-ID/v2.0
+  emailDomain: corp.example
+  existingSecret: oauth2-proxy
+portal:
+  trustedProxies: "10.244.0.0/16"

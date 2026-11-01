@@ -1,0 +1,27 @@
+# Generated-by-design from deploy/platform/* — keep both in sync (see charts/devspaces/README.md).
+{{- if .Values.runtimeClasses.gvisor.enabled }}
+# Sandboxes selectable with `workspace create --isolation gvisor|kata`.
+# The handler must exist in containerd on the nodes you label; nodes without it
+# are excluded via scheduling.nodeSelector.
+#
+#   gVisor:  https://gvisor.dev/docs/user_guide/containerd/quick_start/
+#            containerd: [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+#                          runtime_type = "io.containerd.runsc.v1"
+#   Kata:    kata-deploy DaemonSet installs the shim and labels nodes
+#            https://github.com/kata-containers/kata-containers/tree/main/tools/packaging/kata-deploy
+{{- end }}
+{{- if .Values.runtimeClasses.kata.enabled }}
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+scheduling:
+  nodeSelector:
+    devspaces.io/runtime-gvisor: "true"
+overhead:
+  podFixed:
+    cpu: 100m
+    memory: 128Mi
+{{- end }}

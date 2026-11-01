@@ -17,6 +17,7 @@ portal/
   handlers.go      /api/* handlers, CSRF rule, logging
   portal_test.go   unit + HTTP tests (go test ./...)
   web/             index.html, app.js (UI), content.js (guides + glossary), demo.js, theme.js,
+                   simulation.html (standalone static simulation; `npm run build:sim` re-inlines its CSS),
                    tailwind.src.css → tailwind.css (compiled), catalog.js (generated)
   tailwind.config.js, package.json      Tailwind build (npm run build:css)
   Dockerfile       3-stage build → distroless image

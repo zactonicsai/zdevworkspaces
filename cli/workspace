@@ -170,6 +170,16 @@ def repo_dirname(url: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "-", tail) or "repo"
 
 
+def mcast_mode(cat: dict) -> str:
+    """multus (second interface from a NetworkAttachmentDefinition) or cilium (eBPF datapath on eth0)."""
+    return (cat.get("networking", {}).get("multicast", {}).get("mode") or "multus").lower()
+
+
+def mcast_iface(cat: dict) -> str:
+    mc = cat.get("networking", {}).get("multicast", {})
+    return "eth0" if mcast_mode(cat) == "cilium" else (mc.get("iface") or "net1")
+
+
 def artifact_specs(cat: dict, tools: list[str]) -> list[dict]:
     """Catalog tools with an `artifact` block → JSON specs for /opt/workspace/bin/install-artifact.
     {arch}/{goarch} are left for the pod to fill in; {version} is resolved here."""
@@ -528,7 +538,7 @@ def render_workspace(ns: str, name: str, spec: dict, cat: dict, profile: dict,
         {"name": "GIT_USER_NAME", "value": spec.get("gitName") or ""},
         {"name": "GIT_USER_EMAIL", "value": spec.get("gitEmail") or ""},
         {"name": "WORKSPACE_SSH_LISTEN", "value": "0.0.0.0" if spec.get("expose") else "127.0.0.1"},
-        {"name": "WORKSPACE_MCAST_IFACE", "value": cat["networking"]["multicast"]["iface"] if spec.get("multicast") else ""},
+        {"name": "WORKSPACE_MCAST_IFACE", "value": mcast_iface(cat) if spec.get("multicast") else ""},
         {"name": "TZ", "value": spec.get("tz") or "UTC"},
     ]
     if af.get("url"):
@@ -630,7 +640,7 @@ def render_workspace(ns: str, name: str, spec: dict, cat: dict, profile: dict,
         pod_spec["imagePullSecrets"] = [{"name": cat["pullSecret"]}]
 
     pod_ann = {}
-    if spec.get("multicast"):
+    if spec.get("multicast") and mcast_mode(cat) == "multus":  # cilium mode needs no extra interface
         pod_ann[ANN_NETWORKS] = cat["networking"]["multicast"]["nad"]
 
     objs.append({

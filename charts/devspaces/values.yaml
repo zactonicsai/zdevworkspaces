@@ -1,0 +1,106 @@
+# devspaces — Helm values. Everything here is a knob the cluster layer does not care
+# about; everything the cluster must provide is in deploy/cluster/CONTRACT.md.
+# Install into the namespace the CLI and portal expect:
+#   helm upgrade --install devspaces charts/devspaces -n devspaces-system --create-namespace -f my-values.yaml
+
+global:
+  # Where workspace images live. Developers' pods pull <registry>/workspace-<lang>:<tag>.
+  registry: artifactory.example.com/devspaces-docker
+  tag: "2026.10"
+  # Name of the image pull Secret copied into every tenant namespace by `workspace admin onboard`.
+  # Set pullSecret.dockerconfigjson below to have the chart create it in the system namespace.
+  pullSecretName: artifactory-pull
+
+pullSecret:
+  # base64 of a ~/.docker/config.json with the registry login (kubectl create secret docker-registry … --dry-run=client -o yaml to see one).
+  dockerconfigjson: ""
+
+# The catalog (languages, tools, profiles) ships with the chart (catalog.json). Override any
+# field here; the result is deep-merged. registry/tag/pullSecretName above are always applied.
+catalogOverrides: {}
+  # artifactory:
+  #   url: https://artifactory.example.com/artifactory
+  #   repos: { docker: devspaces-docker, github: github-remote, apt: ubuntu-remote, pypi: pypi-remote, npm: npm-remote, go: go-remote, maven: maven-remote, cargo: cargo-remote }
+  # defaults: { size: 50Gi }
+  # networking: { clusterCIDRs: ["10.0.0.0/16", "172.20.0.0/16"] }
+
+# Extra tool installers published as ConfigMap workspace-features (name → script body).
+features: {}
+  # shellcheck.sh: |
+  #   #!/usr/bin/env bash
+  #   set -Eeuo pipefail; . /opt/workspace/lib.sh
+  #   apt_install shellcheck
+
+reaper:
+  enabled: true
+  schedule: "*/10 * * * *"
+  image: ""            # default: <global.registry>/workspace-cli:<global.tag>
+
+lab:
+  # Label the hardware pool carries, and the taint that keeps everyone else off it.
+  nodeLabel: { key: devspaces.io/lab, value: "true" }
+  taint: { key: devspaces.io/lab, value: "true", effect: NoSchedule }
+
+runtimeClasses:
+  gvisor: { enabled: true, handler: runsc, nodeLabel: { key: devspaces.io/runtime-gvisor, value: "true" } }
+  kata:   { enabled: true, handler: kata-qemu }
+
+multicast:
+  # multus: second interface from a NetworkAttachmentDefinition (any CNI, bare-metal/on-prem L2)
+  # cilium: Cilium eBPF multicast datapath on the pod's normal interface (VXLAN mode, beta)
+  # none:   --multicast is rejected by nothing but will not work; hide it by removing the catalog entry
+  mode: multus
+  multus:
+    master: eth0            # node NIC or VLAN sub-interface carrying the multicast segment
+    range: 10.250.0.0/16
+    exclude: ["10.250.0.0/30", "10.250.255.255/32"]
+  groups: ["239.255.0.0/24"]   # cilium mode: programmed on every node by deploy/cluster/multicast-cilium.sh
+
+admission:
+  enabled: true
+  # Groups allowed to edit the managed tenant NetworkPolicies (add your GitOps controller's group).
+  platformAdminGroups: ["system:masters", "devspaces:platform-admins", "system:serviceaccounts:argocd", "system:serviceaccounts:flux-system"]
+
+devicePlugins:
+  smarterDeviceManager: { enabled: true }   # ConfigMap only; install the DaemonSet with deploy/cluster/addons.sh
+
+portal:
+  enabled: true
+  replicas: 2
+  image: ""            # default: <global.registry>/workspace-portal:<global.tag>
+  userHeader: X-Forwarded-Email
+  groupsHeader: X-Forwarded-Groups
+  trustedProxies: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"   # tighten to the oauth2-proxy pod CIDR
+  labGroup: ""         # if set, only members see hardware/kernel profiles
+  artifactoryToken: "" # read-only token for listing images/tools (or existingSecret)
+  existingSecret: ""   # Secret with key `token` instead of artifactoryToken
+  csp: ""              # override Content-Security-Policy (empty = chart default inside the binary)
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
+oauth2Proxy:
+  enabled: true
+  image: quay.io/oauth2-proxy/oauth2-proxy:v7.8.1
+  replicas: 2
+  issuerUrl: https://login.example.com/
+  emailDomain: corp.example
+  groupsClaim: groups
+  clientId: ""
+  clientSecret: ""
+  cookieSecret: ""      # 32 random bytes, base64: python3 -c 'import os,base64;print(base64.urlsafe_b64encode(os.urandom(32)).decode())'
+  existingSecret: ""    # Secret with keys client-id, client-secret, cookie-secret
+  extraArgs: []
+
+ingress:
+  enabled: true
+  className: nginx
+  host: workspaces.corp.example
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+  tls:
+    enabled: true
+    secretName: workspaces-tls
+
+networkPolicy:
+  enabled: true   # only the auth proxy may reach the portal pods
