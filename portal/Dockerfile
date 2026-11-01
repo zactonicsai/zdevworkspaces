@@ -20,8 +20,8 @@ COPY deploy/platform/catalog.json ./catalog.default.json
 COPY --from=css /src/web/tailwind.css ./web/tailwind.css
 RUN node_free_catalog() { printf '/* generated from deploy/platform/catalog.json */\nwindow.DEMO_CATALOG = '; cat catalog.default.json; printf ';\n'; }; \
     node_free_catalog > web/catalog.js \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /portal . \
- && go test ./... 2>&1 | tail -1
+ && go vet ./... && CGO_ENABLED=0 go test ./... \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /portal .
 
 # Stage 3: minimal runtime.
 FROM gcr.io/distroless/static-debian12:nonroot

@@ -88,6 +88,8 @@ start_sshd() {
   # authorized_keys is read straight from the mount (see sshd_config).
   install -m 600 "$src/ssh_host_ed25519_key"     /etc/ssh/ssh_host_ed25519_key
   install -m 644 "$src/ssh_host_ed25519_key.pub" /etc/ssh/ssh_host_ed25519_key.pub
+  install -d -m 755 /etc/ssh/authorized_keys.d
+  install -m 644 "$src/authorized_keys" "/etc/ssh/authorized_keys.d/$DEV_USER"
   sed "s/__LISTEN__/$listen/" "$WS_DIR/sshd_config" >"$SSHD_CFG"
   /usr/sbin/sshd -t -f "$SSHD_CFG"
   /usr/sbin/sshd -D -e -f "$SSHD_CFG" >>"$LOG/sshd.log" 2>&1 &

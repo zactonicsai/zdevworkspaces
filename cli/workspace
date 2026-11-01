@@ -181,7 +181,10 @@ def artifact_specs(cat: dict, tools: list[str]) -> list[dict]:
             continue
         repo = repos.get(a.get("repo", "generic"), a.get("repo", "generic"))
         path = a["path"].replace("{version}", str(a.get("version", "")))
-        url = a["url"] if a.get("url") else f"{base}/{repo}/{path}"
+        # A repo value that is itself a URL is used verbatim (a mirror elsewhere, or the
+        # public site in a demo without Artifactory); otherwise it is a repo under `url`.
+        repo_base = repo.rstrip("/") if "://" in repo else "/".join(x for x in (base, repo) if x)
+        url = a["url"] if a.get("url") else f"{repo_base}/{path}"
         spec = {"name": t, "url": url, "install": a.get("install", "tar"), "bin": a.get("bin", [t])}
         for k in ("strip", "sha256"):
             if a.get(k) is not None:

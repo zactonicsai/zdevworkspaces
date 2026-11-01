@@ -155,7 +155,7 @@ window.DEMO_CATALOG = {
    "docs": "https://github.com/BurntSushi/ripgrep#readme",
    "artifact": {
     "repo": "github",
-    "path": "BurntSushi/ripgrep/releases/download/{version}/ripgrep-{version}-{arch}-unknown-linux-musl.tar.gz",
+    "path": "BurntSushi/ripgrep/releases/download/{version}/ripgrep-{version}-{triple}.tar.gz",
     "version": "14.1.1",
     "install": "tar",
     "strip": 1,
@@ -170,7 +170,7 @@ window.DEMO_CATALOG = {
    "docs": "https://github.com/sharkdp/fd#readme",
    "artifact": {
     "repo": "github",
-    "path": "sharkdp/fd/releases/download/v{version}/fd-v{version}-{arch}-unknown-linux-musl.tar.gz",
+    "path": "sharkdp/fd/releases/download/v{version}/fd-v{version}-{triple}.tar.gz",
     "version": "10.2.0",
     "install": "tar",
     "strip": 1,
@@ -185,7 +185,7 @@ window.DEMO_CATALOG = {
    "docs": "https://github.com/sharkdp/bat#readme",
    "artifact": {
     "repo": "github",
-    "path": "sharkdp/bat/releases/download/v{version}/bat-v{version}-{arch}-unknown-linux-musl.tar.gz",
+    "path": "sharkdp/bat/releases/download/v{version}/bat-v{version}-{triple}.tar.gz",
     "version": "0.25.0",
     "install": "tar",
     "strip": 1,
@@ -243,7 +243,7 @@ window.DEMO_CATALOG = {
    "docs": "https://github.com/jesseduffield/lazygit#readme",
    "artifact": {
     "repo": "github",
-    "path": "jesseduffield/lazygit/releases/download/v{version}/lazygit_{version}_Linux_{arch}.tar.gz",
+    "path": "jesseduffield/lazygit/releases/download/v{version}/lazygit_{version}_Linux_{arch_alt}.tar.gz",
     "version": "0.50.0",
     "install": "tar",
     "bin": [
@@ -257,7 +257,7 @@ window.DEMO_CATALOG = {
    "docs": "https://dandavison.github.io/delta/",
    "artifact": {
     "repo": "github",
-    "path": "dandavison/delta/releases/download/{version}/delta-{version}-{arch}-unknown-linux-musl.tar.gz",
+    "path": "dandavison/delta/releases/download/{version}/delta-{version}-{triple}.tar.gz",
     "version": "0.18.2",
     "install": "tar",
     "strip": 1,
@@ -287,7 +287,7 @@ window.DEMO_CATALOG = {
    "docs": "https://github.com/hadolint/hadolint#readme",
    "artifact": {
     "repo": "github",
-    "path": "hadolint/hadolint/releases/download/v{version}/hadolint-Linux-{arch}",
+    "path": "hadolint/hadolint/releases/download/v{version}/hadolint-Linux-{arch_alt}",
     "version": "2.12.0",
     "install": "binary",
     "bin": [
@@ -330,7 +330,7 @@ window.DEMO_CATALOG = {
    "docs": "https://just.systems/man/en/",
    "artifact": {
     "repo": "github",
-    "path": "casey/just/releases/download/{version}/just-{version}-{arch}-unknown-linux-musl.tar.gz",
+    "path": "casey/just/releases/download/{version}/just-{version}-{triple}.tar.gz",
     "version": "1.40.0",
     "install": "tar",
     "bin": [
@@ -344,7 +344,7 @@ window.DEMO_CATALOG = {
    "docs": "https://github.com/sharkdp/hyperfine#readme",
    "artifact": {
     "repo": "github",
-    "path": "sharkdp/hyperfine/releases/download/v{version}/hyperfine-v{version}-{arch}-unknown-linux-musl.tar.gz",
+    "path": "sharkdp/hyperfine/releases/download/v{version}/hyperfine-v{version}-{triple}.tar.gz",
     "version": "1.19.0",
     "install": "tar",
     "strip": 1,

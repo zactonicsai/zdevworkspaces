@@ -133,7 +133,7 @@ func (a *artifactory) Tools(ctx context.Context, cat *Catalog) map[string]toolAv
 	sort.Strings(names)
 	for _, spec := range artifactSpecs(cat, names) {
 		name := str(spec, "name")
-		u := strings.NewReplacer("{arch}", "x86_64", "{goarch}", "amd64").Replace(str(spec, "url"))
+		u := strings.NewReplacer("{arch}", "x86_64", "{goarch}", "amd64", "{arch_alt}", "x86_64", "{triple}", "x86_64-unknown-linux-musl").Replace(str(spec, "url"))
 		ta := toolAvailability{URL: u, Checked: time.Now().UTC().Format(time.RFC3339)}
 		cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		req, _ := http.NewRequestWithContext(cctx, http.MethodHead, u, nil)

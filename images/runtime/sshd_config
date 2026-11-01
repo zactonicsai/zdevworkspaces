@@ -11,11 +11,13 @@ UsePAM no
 
 # Keys only. The first file is the workspace Secret mount, read live: a key added
 # with `workspace ssh-config` on another machine works within a minute, no
-# restart. The second is yours to add extra keys to (it persists on the volume).
+# restart. The second is a root-owned copy made at boot (used when the mount's
+# ownership fails StrictModes, e.g. a plain `docker run` with a bind mount). The
+# third is yours to add extra keys to (it persists on the volume).
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
-AuthorizedKeysFile /etc/workspace/ssh/authorized_keys .ssh/authorized_keys
+AuthorizedKeysFile /etc/workspace/ssh/authorized_keys /etc/ssh/authorized_keys.d/%u .ssh/authorized_keys
 PermitRootLogin no
 AllowUsers dev
 

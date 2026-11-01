@@ -1,0 +1,57 @@
+# Level 1 demo — no Kubernetes. Two containers:
+#   portal     the web UI with an in-memory fake cluster (-mock)       → http://localhost:8080
+#   workspace  one real workspace image, sshd on localhost:2222, home on a Docker volume
+# Build the images first (from the repo root):
+#   LANGS="go" ./images/build.sh            → workspace/workspace-base:dev, workspace/workspace-go:dev, …
+#   ./deploy/demo/make-ssh-keys.sh          → deploy/demo/ssh/ (host key + your authorized key)
+#   docker compose -f deploy/demo/docker-compose.yaml up -d
+#   ssh -p 2222 dev@localhost
+name: devspaces-demo
+services:
+  portal:
+    build:
+      context: ../..
+      dockerfile: portal/Dockerfile
+    image: workspace/workspace-portal:dev
+    command: ["-mock", "-addr=:8080"]
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  workspace:
+    image: workspace/workspace-go:dev
+    hostname: demo-workspace
+    environment:
+      WORKSPACE_NAME: demo
+      WORKSPACE_LANG: go
+      WORKSPACE_LANGUAGES: go
+      WORKSPACE_PROFILE: standard
+      WORKSPACE_SSH_LISTEN: 0.0.0.0          # Kubernetes keeps this on loopback; Docker needs the port published
+      WORKSPACE_TOOLS: cmake                   # a scripted feature …
+      WORKSPACE_ARTIFACTS: >-                  # … and an Artifactory-style download, straight from GitHub here
+        [{"name":"ripgrep","url":"https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-{triple}.tar.gz","install":"tar","strip":1,"bin":["rg"]}]
+      WORKSPACE_REPO: https://github.com/golang/example.git
+      GIT_AUTH_MODE: none
+      GIT_USER_NAME: Demo Developer
+      GIT_USER_EMAIL: demo@example.com
+      TZ: UTC
+    ports:
+      - "2222:2222"
+    volumes:
+      - demo-home:/home/dev                              # survives `docker compose down`
+      - ./ssh:/etc/workspace/ssh:ro                      # from make-ssh-keys.sh
+    # The same security posture as a standard workspace pod, minus the user namespace
+    # (enable it in Docker with userns-remap if you want to see that part too).
+    cap_drop: [ALL]
+    cap_add: [AUDIT_WRITE, CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, MKNOD, NET_BIND_SERVICE, SETFCAP, SETGID, SETPCAP, SETUID, SYS_CHROOT]
+    sysctls:
+      net.ipv4.ping_group_range: "0 2147483647"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/2222"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  demo-home:

@@ -18,8 +18,13 @@ name=$(j '.name'); url=$(j '.url'); kind=$(j '.install // "tar"'); strip=$(j '.s
 mapfile -t bins < <(printf '%s' "$spec" | jq -r '.bin // [] | .[]')
 [ -n "$name" ] && [ -n "$url" ] || { echo "install-artifact: name and url are required" >&2; exit 2; }
 # Architecture placeholders are resolved on the node that runs the pod, so one catalog entry serves amd64 and arm64.
-url=${url//\{arch\}/$(uname -m)}                      # x86_64 | aarch64
-url=${url//\{goarch\}/$(dpkg --print-architecture)}   # amd64  | arm64
+#   {arch}      x86_64 | aarch64                 (uname -m)
+#   {goarch}    amd64  | arm64                   (Go / Docker spelling)
+#   {arch_alt}  x86_64 | arm64                   (projects that mix the two, e.g. hadolint, lazygit)
+#   {triple}    x86_64-unknown-linux-musl | aarch64-unknown-linux-gnu   (Rust release assets)
+m=$(uname -m); g=$(dpkg --print-architecture)
+case "$m" in x86_64) triple=x86_64-unknown-linux-musl; alt=x86_64 ;; aarch64) triple=aarch64-unknown-linux-gnu; alt=arm64 ;; *) triple="$m-unknown-linux-gnu"; alt=$m ;; esac
+url=${url//\{arch\}/$m}; url=${url//\{goarch\}/$g}; url=${url//\{arch_alt\}/$alt}; url=${url//\{triple\}/$triple}
 
 STATE=/var/lib/workspace/artifacts; mkdir -p "$STATE" /opt/tools
 if [ -f "$STATE/$name.url" ] && [ "$(cat "$STATE/$name.url")" = "$url" ]; then

@@ -331,9 +331,21 @@ func artifactSpecs(cat *Catalog, tools []string) []Obj {
 			version = ""
 		}
 		path := strings.ReplaceAll(str(a, "path"), "{version}", version)
+		// A repo value that is itself a URL is used verbatim (a mirror elsewhere, or the
+		// public site in a demo without Artifactory); otherwise it is a repo under `url`.
+		repoBase := strings.TrimRight(repo, "/")
+		if !strings.Contains(repo, "://") {
+			parts := []string{}
+			for _, x := range []string{base, repo} {
+				if x != "" {
+					parts = append(parts, x)
+				}
+			}
+			repoBase = strings.Join(parts, "/")
+		}
 		u := str(a, "url")
 		if u == "" {
-			u = base + "/" + repo + "/" + path
+			u = repoBase + "/" + path
 		}
 		spec := Obj{"name": t, "url": u, "install": orDefault(str(a, "install"), "tar")}
 		if bins, ok := a["bin"].([]any); ok {

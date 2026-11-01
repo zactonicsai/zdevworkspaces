@@ -20,6 +20,7 @@ workspace 'rust' is ready in namespace ws-alice
 |---|---|---|
 | CLI with `--lang` / `--tools` | `workspace`, single-file Python 3.9+, stdlib only, drives `kubectl`; `--lang go,python` for multi-language | `cli/workspace` |
 | Web portal (HTML + Tailwind + JS, Go API) | `portal/`: IBM Carbon-style UI, light/dark, 14–36 px text, guides & glossary popups, Artifactory-backed catalog; Go server impersonates the developer | §14, `portal/README.md` |
+| Local demo on Docker | Compose (portal + one workspace) and a 3-node kind cluster running everything | `docs/demo-docker.md`, `deploy/demo/` |
 | Artifactory as the source of everything | images, tool downloads and every package manager (pip/npm/go/cargo/maven/apt) go through Artifactory repos | §15 |
 | VS Code Remote-SSH | sshd in the pod, reached through `kubectl exec` as an SSH `ProxyCommand`; keys and `~/.ssh/config` managed by the CLI; port forwarding native to SSH | §4 |
 | Persistence | One PVC per workspace mounted at `/home/dev`; everything a developer touches lives there | §5 |
@@ -102,7 +103,9 @@ deploy/platform/                kubectl apply -k   (installed once per cluster)
   policy/admission.yaml         ValidatingAdmissionPolicy guardrails
   features/example-tool.sh      a hot-added tool installer
 deploy/examples/                rendered output for four workspace variants, a tenant, the platform
-deploy/portal/                  portal Deployment, impersonation RBAC, oauth2-proxy + Ingress example
+deploy/portal/                  portal Deployment, impersonation RBAC (base/), oauth2-proxy + Ingress example
+deploy/demo/                    Docker Compose + kind overlay for a laptop demo (docs/demo-docker.md)
+docs/demo-docker.md             step-by-step demo guide
 portal/                         Go API + web UI (see portal/README.md)
 ```
 
@@ -306,7 +309,15 @@ The lab tier is the honest exception: a privileged pod shares the host kernel, s
 security boundary there is the **node**, enforced by the taint, the selector and the
 one-per-node anti-affinity. For kernel work that may panic, use `kernel` (Kata) instead.
 
-## 11. Platform install (admin)
+## 11. Try it on your laptop first
+
+`docs/demo-docker.md` is a step-by-step walkthrough that needs nothing but Docker:
+Level 1 runs the portal (demo mode) and one real workspace container via Compose;
+Level 2 runs the complete system — platform, portal, CLI, lab node, reaper, admission
+guardrails — on a 3-node kind cluster (`./deploy/demo/demo-up.sh`); Level 3 adds a real
+Artifactory OSS container for the tool-download path.
+
+## 12. Platform install (admin)
 
 ```bash
 # 1. Node prerequisites: K8s ≥ 1.36 (userns GA) or ≥ 1.33 with the gate, kernel ≥ 6.3,
@@ -330,7 +341,7 @@ Day-2: `workspace list -A`, `workspace admin reap -A --dry-run`, bump `catalog.j
 `tag` to roll images (next start of each workspace picks it up), add tools through the
 `workspace-features` ConfigMap, snapshot PVCs with your CSI driver's VolumeSnapshot.
 
-## 12. Developer quick reference
+## 13. Developer quick reference
 
 ```bash
 workspace catalog                                   # what you can ask for
@@ -346,7 +357,7 @@ workspace ssh-config go     # on a second laptop
 workspace stop go · workspace start go · workspace delete go [--purge]
 ```
 
-## 13. Web portal
+## 14. Web portal
 
 `portal/` is a single Go binary (standard library only) that serves a vanilla-JS,
 Tailwind-styled single-page app and a JSON API. It renders **the same Kubernetes objects
@@ -381,7 +392,7 @@ as the CLI** (a test compares the two), so portal and CLI can manage each other'
 
 Run: `cd portal && go run . -mock` → http://localhost:8080. Deploy: `kubectl apply -k deploy/portal`.
 
-## 14. Artifactory: all resources from one place
+## 15. Artifactory: all resources from one place
 
 `catalog.json → artifactory` names the Artifactory base URL and one repository per
 ecosystem (`docker`, `generic`, `github`, `apt`, `pypi`, `npm`, `go`, `maven`, `cargo`).
@@ -396,7 +407,7 @@ With that in place:
 | Credentials | per-developer token in `workspace-profile` (portal Profile page or `kubectl create secret`), injected as `ARTIFACTORY_TOKEN`; a netrc at `/run/workspace/netrc` serves curl, pip, Go and git |
 | Portal catalog | lists images/tags and checks tool availability through the Artifactory REST API (read-only token) |
 
-## 15. Known limits and trade-offs
+## 16. Known limits and trade-offs
 
 * `hostUsers: false` + NFS home volumes do not work (no idmap support in the NFS client);
   use block storage or `--isolation gvisor`.

@@ -7,9 +7,11 @@
 #   EXTRA_FEATURES  optional comma list to bake in (cmake,gdb) → tag suffix -cmake-gdb
 ARG BASE_IMAGE=workspace-base:dev
 FROM ${BASE_IMAGE}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG LANG_FEATURE
 ARG EXTRA_FEATURES=""
-RUN install-feature "${LANG_FEATURE}" \
+RUN test -n "${LANG_FEATURE}" || { echo "LANG_FEATURE build-arg is required"; exit 1; } \
+ && install-feature "${LANG_FEATURE}" \
  && for f in ${EXTRA_FEATURES//,/ }; do install-feature "$f"; done \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /tmp/*
 ENV WORKSPACE_IMAGE=${LANG_FEATURE}
