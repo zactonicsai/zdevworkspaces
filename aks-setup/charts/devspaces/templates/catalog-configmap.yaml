@@ -1,0 +1,32 @@
+{{- /* The CLI and the portal look for the catalog in devspaces-system; fail early otherwise. */ -}}
+{{- if and (ne .Release.Namespace "devspaces-system") (not .Values.allowAnyNamespace) }}
+{{- fail (printf "install into namespace devspaces-system (got %s): helm … -n devspaces-system --create-namespace. Set allowAnyNamespace=true only if you also set WORKSPACE_SYSTEM_NAMESPACE for the CLI." .Release.Namespace) }}
+{{- end }}
+# The catalog: chart's catalog.json, deep-merged with .Values.catalogOverrides, with the
+# registry/tag/pull-secret from .Values.global applied last so images and the catalog never disagree.
+{{- $cat := .Files.Get "catalog.json" | fromJson }}
+{{- $cat = mergeOverwrite $cat (deepCopy .Values.catalogOverrides) }}
+{{- $_ := set $cat "registry" .Values.global.registry }}
+{{- $_ := set $cat "tag" .Values.global.tag }}
+{{- $_ := set $cat "pullSecret" .Values.global.pullSecretName }}
+{{- $mc := (index $cat "networking" "multicast") }}
+{{- $_ := set $mc "mode" .Values.multicast.mode }}
+{{- $_ := set $mc "nad" (printf "%s/mcast" .Release.Namespace) }}
+{{- $_ := set $mc "groups" .Values.multicast.groups }}
+{{- $net := (index $cat "networking") }}
+{{- $_ := set $net "mesh" (dict "mode" .Values.networking.mesh) }}
+{{- $_ := set $net "links" (dict "enabled" .Values.networking.links) }}
+{{- if .Values.storage.choices }}
+{{- $_ := set $cat "storage" (dict "choices" .Values.storage.choices "snapshotClass" .Values.storage.snapshotClass "protectHomeDrives" .Values.storage.protectHomeDrives "sharedMountPath" "/shared") }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workspace-catalog
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: devspaces
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+data:
+  catalog.json: |-
+{{ toPrettyJson $cat | indent 4 }}

@@ -1,0 +1,32 @@
+# On-prem / VMware (kubeadm, Rancher RKE2, Tanzu, OpenShift-compatible objects). Pair with
+# deploy/cluster/providers/vmware-onprem.md and kubeadm-node-prep.sh.
+global:
+  registry: artifactory.corp.example/devspaces-docker
+  tag: "2026.10"
+  pullSecretName: artifactory-pull
+pullSecret:
+  dockerconfigjson: ""         # base64 ~/.docker/config.json for the registry, or create the Secret yourself
+catalogOverrides:
+  artifactory:
+    url: https://artifactory.corp.example/artifactory
+    repos: { docker: devspaces-docker, generic: devspaces-generic, github: github-remote, apt: ubuntu-remote, pypi: pypi-remote, npm: npm-remote, go: go-remote, maven: maven-remote, cargo: cargo-remote }
+  defaults: { storageClass: vsphere-csi }           # or longhorn / ceph-rbd — block storage with expansion
+  networking:
+    clusterCIDRs: ["10.244.0.0/16", "10.96.0.0/12"]
+multicast:
+  mode: multus                 # real L2 available: macvlan on the multicast VLAN
+  multus:
+    master: ens192.300          # VLAN 300 sub-interface on every multicast-pool node
+    range: 10.250.0.0/16
+ingress:
+  className: nginx
+  host: workspaces.corp.example
+  annotations:
+    cert-manager.io/cluster-issuer: corp-ca
+  tls: { enabled: true, secretName: workspaces-tls }
+oauth2Proxy:
+  issuerUrl: https://keycloak.corp.example/realms/corp
+  emailDomain: corp.example
+  existingSecret: oauth2-proxy
+portal:
+  trustedProxies: "10.244.0.0/16"
