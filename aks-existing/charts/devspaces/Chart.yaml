@@ -1,0 +1,8 @@
+apiVersion: v2
+name: devspaces
+description: On-demand developer workspaces on Kubernetes — platform (catalog, RBAC, idle reaper, guardrails, multicast, lab tier) and the web portal. Provider-agnostic; needs only a cluster that meets deploy/cluster/CONTRACT.md.
+type: application
+version: 1.0.0
+appVersion: "2026.10"
+keywords: [developer-workspaces, remote-development, vscode, ssh]
+home: https://example.com/devspaces

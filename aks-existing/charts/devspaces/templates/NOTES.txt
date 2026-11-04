@@ -1,0 +1,13 @@
+devspaces {{ .Chart.AppVersion }} installed in namespace {{ .Release.Namespace }}.
+
+  Images:     {{ .Values.global.registry }}/workspace-<lang>:{{ .Values.global.tag }}
+  Multicast:  {{ .Values.multicast.mode }}
+  Portal:     {{ if .Values.portal.enabled }}{{ if .Values.ingress.enabled }}https://{{ .Values.ingress.host }}{{ else }}kubectl -n {{ .Release.Namespace }} port-forward svc/workspace-portal 8080:80{{ end }}{{ else }}disabled{{ end }}
+
+Next steps
+  1. Push the images:          REGISTRY={{ .Values.global.registry }} TAG={{ .Values.global.tag }} PUSH=1 ./images/build.sh
+  2. Onboard developers:       workspace admin onboard alice@corp.example [--lab]
+  3. Verify:                   ./deploy/prod/40-smoke-test.sh
+  {{- if eq .Values.multicast.mode "cilium" }}
+  4. Program multicast groups: ./deploy/cluster/multicast-cilium.sh {{ join " " .Values.multicast.groups }}
+  {{- end }}

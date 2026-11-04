@@ -1,0 +1,99 @@
+{{- /*
+Istio ingress for the portal: for clusters that already run Istio (the AKS Istio add-on
+`az aks mesh enable` with its external ingress gateway, or self-managed Istio). The Gateway
+binds to the existing gateway pods through `gatewaySelector`; the VirtualService sends the
+portal host to oauth2-proxy (browser sign-in) or straight to the portal (bearer tokens only).
+*/ -}}
+{{- if and .Values.portal.enabled .Values.ingress.enabled .Values.ingress.istio.enabled }}
+{{- $gwns := .Values.ingress.istio.gatewayNamespace | default .Release.Namespace }}
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: devspaces
+  namespace: {{ $gwns }}
+spec:
+  selector:
+{{ toYaml .Values.ingress.istio.gatewaySelector | indent 4 }}
+  servers:
+    - port: { number: 80, name: http, protocol: HTTP }
+      hosts: [{{ .Values.ingress.host | quote }}]
+      {{- if and .Values.ingress.istio.credentialName .Values.ingress.istio.httpsRedirect }}
+      tls: { httpsRedirect: true }
+      {{- end }}
+    {{- if .Values.ingress.istio.credentialName }}
+    - port: { number: 443, name: https, protocol: HTTPS }
+      hosts: [{{ .Values.ingress.host | quote }}]
+      tls:
+        mode: SIMPLE
+        credentialName: {{ .Values.ingress.istio.credentialName }}   # Secret in the ingress gateway's namespace
+    {{- end }}
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: devspaces
+  namespace: {{ .Release.Namespace }}
+spec:
+  hosts: [{{ .Values.ingress.host | quote }}]
+  gateways: [{{ printf "%s/devspaces" $gwns | quote }}]
+  http:
+    - name: tunnel          # WebSocket SSH tunnel: long-lived, no retries, generous timeout
+      match: [{ uri: { regex: "^/api/workspaces/[^/]+/tunnel$" } }]
+      timeout: 0s
+      retries: { attempts: 0 }
+      route:
+        - destination:
+            host: {{ if .Values.oauth2Proxy.enabled }}oauth2-proxy{{ else }}workspace-portal{{ end }}.{{ .Release.Namespace }}.svc.cluster.local
+            port: { number: 80 }
+    - name: portal
+      route:
+        - destination:
+            host: {{ if .Values.oauth2Proxy.enabled }}oauth2-proxy{{ else }}workspace-portal{{ end }}.{{ .Release.Namespace }}.svc.cluster.local
+            port: { number: 80 }
+      timeout: 120s
+{{- end }}
+{{- if .Values.istioAuth.enabled }}
+{{- if .Values.istioAuth.strictMTLS }}
+---
+# Everything in the platform namespace must speak mTLS (sidecar or ambient).
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: {{ .Release.Namespace }}
+spec:
+  mtls: { mode: STRICT }
+{{- end }}
+{{- if .Values.istioAuth.jwt.enabled }}
+---
+# Defence in depth: the sidecar (or waypoint) rejects bearer tokens that are not from our
+# issuer before the portal even sees them; the portal still validates them itself.
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: workspace-portal-jwt
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/name: workspace-portal }
+  jwtRules:
+    - issuer: {{ .Values.istioAuth.jwt.issuer | quote }}
+      jwksUri: {{ .Values.istioAuth.jwt.jwksUri | quote }}
+      audiences: {{ toJson .Values.istioAuth.jwt.audiences }}
+      forwardOriginalToken: true
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: workspace-portal
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/name: workspace-portal }
+  action: ALLOW
+  rules:
+    - from: [{ source: { principals: ["cluster.local/ns/{{ .Release.Namespace }}/sa/oauth2-proxy"] } }]   # browser sessions via the auth proxy
+    - from: [{ source: { requestPrincipals: ["*"] } }]                                                   # any valid JWT from the issuer above
+    - to: [{ operation: { paths: ["/healthz", "/readyz", "/.well-known/*"] } }]                        # probes and login hints
+{{- end }}
+{{- end }}

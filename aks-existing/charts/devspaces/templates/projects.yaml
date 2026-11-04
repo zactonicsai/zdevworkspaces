@@ -1,0 +1,122 @@
+{{- /*
+Project namespaces: a "virtual namespace" shared by a team. Every member's workspaces live
+in ws-proj-<name>, see each other in `list`, and talk to each other freely (same tenant
+NetworkPolicies as a personal namespace). Equivalent to:
+  workspace admin project create NAME --members a,b --groups g
+*/ -}}
+{{- $cat := .Files.Get "catalog.json" | fromJson }}
+{{- $cat = mergeOverwrite $cat (deepCopy .Values.catalogOverrides) }}
+{{- $net := index $cat "networking" }}
+{{- range .Values.projects }}
+{{- $ns := printf "ws-proj-%s" .name }}
+{{- $psa := ternary "privileged" "baseline" (default false .lab) }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    devspaces.io/tenant: proj-{{ .name }}
+    devspaces.io/tier: {{ ternary "lab" "standard" (default false .lab) }}
+    devspaces.io/kind: project
+    devspaces.io/project: {{ .name }}
+    devspaces.io/managed-by: helm
+    pod-security.kubernetes.io/enforce: {{ $psa }}
+    pod-security.kubernetes.io/audit: {{ $psa }}
+    pod-security.kubernetes.io/warn: {{ $psa }}
+    {{- if eq $.Values.networking.mesh "istio-ambient" }}
+    istio.io/dataplane-mode: ambient
+    {{- else if eq $.Values.networking.mesh "istio-sidecar" }}
+    {{- if $.Values.networking.istioRevision }}
+    istio.io/rev: {{ $.Values.networking.istioRevision }}
+    {{- else }}
+    istio-injection: enabled
+    {{- end }}
+    {{- end }}
+  annotations:
+    devspaces.io/members: {{ join "," (default (list) .members) | quote }}
+    devspaces.io/member-groups: {{ join "," (default (list) .groups) | quote }}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata: { name: workspace-quota, namespace: {{ $ns }}, labels: { devspaces.io/managed-by: helm } }
+spec:
+  hard:
+{{- $q := default (dict) .quota }}
+    requests.cpu: {{ default (default "32" .cpu) $q.cpu | quote }}
+    requests.memory: {{ default (default "128Gi" .memory) $q.memory }}
+    limits.memory: {{ default (default "128Gi" .memory) $q.memory }}
+    requests.storage: {{ default (default "1Ti" .storage) $q.storage }}
+    persistentvolumeclaims: "40"
+    pods: "40"
+    count/statefulsets.apps: "40"
+---
+apiVersion: v1
+kind: LimitRange
+metadata: { name: workspace-defaults, namespace: {{ $ns }}, labels: { devspaces.io/managed-by: helm } }
+spec:
+  limits:
+    - type: Container
+      default: { cpu: "2", memory: 4Gi, ephemeral-storage: 10Gi }
+      defaultRequest: { cpu: 250m, memory: 512Mi, ephemeral-storage: 1Gi }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: workspace, namespace: {{ $ns }}, labels: { devspaces.io/managed-by: helm } }
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: workspace-heartbeat, namespace: {{ $ns }}, labels: { devspaces.io/managed-by: helm } }
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: workspace-heartbeat, namespace: {{ $ns }}, labels: { devspaces.io/managed-by: helm } }
+subjects:
+  - { kind: ServiceAccount, name: workspace, namespace: {{ $ns }} }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: workspace-heartbeat }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: workspace-developer, namespace: {{ $ns }}, labels: { devspaces.io/managed-by: helm } }
+subjects:
+  {{- range (default (list) .members) }}
+  {{- if hasPrefix "group:" . }}
+  - { kind: Group, name: {{ trimPrefix "group:" . | quote }}, apiGroup: rbac.authorization.k8s.io }
+  {{- else }}
+  - { kind: User, name: {{ . | quote }}, apiGroup: rbac.authorization.k8s.io }
+  {{- end }}
+  {{- end }}
+  {{- range (default (list) .groups) }}
+  - { kind: Group, name: {{ . | quote }}, apiGroup: rbac.authorization.k8s.io }
+  {{- end }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: workspace-developer }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: tenant-ingress, namespace: {{ $ns }}, labels: { devspaces.io/managed-by: helm } }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from: [ { podSelector: {} } ]        # everything inside the project talks freely
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: tenant-egress, namespace: {{ $ns }}, labels: { devspaces.io/managed-by: helm } }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: [ { podSelector: {} } ]
+    - to: [ { namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } } } ]
+      ports: [ { protocol: UDP, port: 53 }, { protocol: TCP, port: 53 } ]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: {{ concat (default (list) (index $net "clusterCIDRs")) (default (list) (index $net "blockedEgress")) | toJson }}
+{{- end }}
