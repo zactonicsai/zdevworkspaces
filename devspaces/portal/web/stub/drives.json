@@ -1,0 +1,117 @@
+{
+ "drives": [
+  {
+   "name": "ws-api-home",
+   "namespace": "ws-demo",
+   "kind": "home",
+   "owner": "demo",
+   "size": "30Gi",
+   "storage": "fast",
+   "storageClass": "workspace-home-premium",
+   "accessModes": [
+    "ReadWriteOnce"
+   ],
+   "phase": "Bound",
+   "attachedTo": "api",
+   "mountedBy": [],
+   "sharedWith": [],
+   "lastWorkspace": "api",
+   "languages": [
+    "go",
+    "python"
+   ],
+   "createdAt": "2026-11-01T09:00:00Z",
+   "protected": true,
+   "snapshots": 1
+  },
+  {
+   "name": "ws-web-home",
+   "namespace": "ws-demo",
+   "kind": "home",
+   "owner": "demo",
+   "size": "20Gi",
+   "storage": "standard",
+   "storageClass": "workspace-home-standard",
+   "accessModes": [
+    "ReadWriteOnce"
+   ],
+   "phase": "Bound",
+   "attachedTo": "web",
+   "mountedBy": [],
+   "sharedWith": [],
+   "lastWorkspace": "web",
+   "languages": [
+    "node"
+   ],
+   "createdAt": "2026-10-28T13:00:00Z",
+   "protected": true,
+   "snapshots": 0
+  },
+  {
+   "name": "ws-old-rust-home",
+   "namespace": "ws-demo",
+   "kind": "home",
+   "owner": "demo",
+   "size": "50Gi",
+   "storage": "fast",
+   "storageClass": "workspace-home-premium",
+   "accessModes": [
+    "ReadWriteOnce"
+   ],
+   "phase": "Bound",
+   "attachedTo": "",
+   "mountedBy": [],
+   "sharedWith": [],
+   "lastWorkspace": "old-rust",
+   "languages": [
+    "rust"
+   ],
+   "createdAt": "2026-09-12T10:00:00Z",
+   "protected": true,
+   "snapshots": 0
+  },
+  {
+   "name": "shared-team-data",
+   "namespace": "ws-demo",
+   "kind": "shared",
+   "owner": "demo",
+   "size": "100Gi",
+   "storage": "shared",
+   "storageClass": "workspace-shared-files",
+   "accessModes": [
+    "ReadWriteMany"
+   ],
+   "phase": "Bound",
+   "mountedBy": [
+    "api"
+   ],
+   "sharedWith": [
+    "bob@example.com"
+   ],
+   "languages": [],
+   "createdAt": "2026-10-20T10:00:00Z",
+   "protected": false,
+   "snapshots": 0
+  },
+  {
+   "name": "shared-alice-datasets",
+   "namespace": "ws-demo",
+   "kind": "shared-mount",
+   "owner": "alice",
+   "sharedBy": "alice",
+   "size": "500Gi",
+   "storage": "shared",
+   "storageClass": "workspace-shared-files",
+   "accessModes": [
+    "ReadWriteMany"
+   ],
+   "phase": "Bound",
+   "mountedBy": [],
+   "sharedWith": [],
+   "languages": [],
+   "createdAt": "2026-10-25T10:00:00Z",
+   "protected": false,
+   "snapshots": 0
+  }
+ ]
+}

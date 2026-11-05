@@ -1,0 +1,15 @@
+{
+ "projects": [
+  {
+   "name": "checkout",
+   "namespace": "ws-proj-checkout",
+   "members": [
+    "demo@example.com",
+    "bob@example.com"
+   ],
+   "groups": [],
+   "tier": "standard",
+   "mesh": "none"
+  }
+ ]
+}

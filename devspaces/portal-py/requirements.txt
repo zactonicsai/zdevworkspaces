@@ -1,0 +1,2 @@
+# Bearer-token (OIDC) validation. Everything else is the standard library.
+PyJWT[crypto]>=2.9,<3

@@ -1,0 +1,151 @@
+{
+ "workspaces": [
+  {
+   "name": "api",
+   "namespace": "ws-demo",
+   "tier": "standard",
+   "status": "Running",
+   "ready": true,
+   "languages": [
+    "go",
+    "python"
+   ],
+   "tools": [
+    "ripgrep",
+    "python"
+   ],
+   "profile": "standard",
+   "image": "artifactory.example.com/devspaces-docker/workspace-go:2026.10",
+   "node": "aks-workspaces-12345-vmss000001",
+   "idleTimeout": "4h",
+   "lastActive": "2026-11-04T15:00:00Z",
+   "startedAt": "2026-11-04T15:00:00Z",
+   "createdAt": "2026-11-01T09:00:00Z",
+   "expose": false,
+   "drive": "ws-api-home",
+   "storage": "fast",
+   "mounts": [
+    "shared:team-data"
+   ],
+   "dns": "ws-api.ws-demo.svc.cluster.local",
+   "spec": {
+    "lang": "go",
+    "languages": [
+     "go",
+     "python"
+    ],
+    "tools": [
+     "ripgrep",
+     "python"
+    ],
+    "profile": "standard",
+    "isolation": "userns",
+    "image": "artifactory.example.com/devspaces-docker/workspace-go:2026.10",
+    "repo": "git@github.com:acme/api.git",
+    "branch": "main",
+    "gitAuth": "deploy-key",
+    "size": "30Gi",
+    "storage": "fast",
+    "drive": "ws-api-home",
+    "mounts": [
+     "shared:team-data"
+    ],
+    "cpu": "4",
+    "memory": "8Gi",
+    "cpuRequest": "1",
+    "memoryRequest": "2Gi",
+    "multicast": false,
+    "devices": {},
+    "hostPaths": [],
+    "caps": [],
+    "expose": false,
+    "idleTimeout": "4h",
+    "createdAt": "2026-11-01T09:00:00Z",
+    "createdBy": "demo@example.com"
+   }
+  },
+  {
+   "name": "web",
+   "namespace": "ws-demo",
+   "tier": "standard",
+   "status": "Stopped",
+   "ready": false,
+   "languages": [
+    "node"
+   ],
+   "tools": [],
+   "profile": "standard",
+   "image": "artifactory.example.com/devspaces-docker/workspace-node:2026.10",
+   "idleTimeout": "2h",
+   "createdAt": "2026-10-28T13:00:00Z",
+   "expose": false,
+   "drive": "ws-web-home",
+   "storage": "standard",
+   "mounts": [],
+   "dns": "ws-web.ws-demo.svc.cluster.local",
+   "spec": {
+    "lang": "node",
+    "languages": [
+     "node"
+    ],
+    "tools": [],
+    "profile": "standard",
+    "isolation": "userns",
+    "image": "artifactory.example.com/devspaces-docker/workspace-node:2026.10",
+    "repo": "",
+    "gitAuth": "none",
+    "size": "20Gi",
+    "storage": "standard",
+    "drive": "ws-web-home",
+    "mounts": [],
+    "cpu": "2",
+    "memory": "4Gi",
+    "cpuRequest": "500m",
+    "memoryRequest": "1Gi",
+    "multicast": false,
+    "devices": {},
+    "hostPaths": [],
+    "caps": [],
+    "expose": false,
+    "idleTimeout": "2h",
+    "createdAt": "2026-10-28T13:00:00Z",
+    "createdBy": "demo@example.com"
+   }
+  }
+ ],
+ "sharedWithMe": [
+  {
+   "name": "engine",
+   "namespace": "ws-alice",
+   "owner": "alice",
+   "tier": "standard",
+   "status": "Running",
+   "ready": true,
+   "languages": [
+    "rust"
+   ],
+   "tools": [
+    "cmake",
+    "gdb"
+   ],
+   "profile": "standard",
+   "image": "artifactory.example.com/devspaces-docker/workspace-rust:2026.10",
+   "idleTimeout": "4h",
+   "createdAt": "2026-10-30T08:00:00Z",
+   "drive": "ws-engine-home",
+   "mounts": [],
+   "dns": "ws-engine.ws-alice.svc.cluster.local",
+   "spec": {
+    "lang": "rust",
+    "languages": [
+     "rust"
+    ],
+    "tools": [
+     "cmake",
+     "gdb"
+    ],
+    "profile": "standard"
+   }
+  }
+ ]
+}

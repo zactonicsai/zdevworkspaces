@@ -1,0 +1,16 @@
+deploy/cluster/env.sh
+deploy/prod/secrets.values.yaml
+deploy/demo/ssh/
+portal/node_modules/
+deploy/cluster/providers/azure/env.sh
+deploy/cluster/providers/azure/entra.values.yaml
+deploy/cluster/providers/azure/.portal-client-secret
+clients/wsctl/wsctl
+clients/wsctl/dist/
+portal/portal
+deploy/cluster/providers/azure/existing/env.sh
+deploy/cluster/providers/azure/existing/detected.env
+deploy/cluster/providers/azure/existing/values-existing.yaml
+deploy/demo/keycloak/.env
+deploy/demo/keycloak/kubeconfig-internal
+deploy/cluster/providers/azure/existing/route-*.yaml

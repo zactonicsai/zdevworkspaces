@@ -1,0 +1,24 @@
+{
+ "dns": "ws-api.ws-demo.svc.cluster.local",
+ "podIP": "10.244.1.23",
+ "namespace": "ws-demo",
+ "sameNamespace": [
+  "web"
+ ],
+ "links": [
+  {
+   "workspace": "api",
+   "peer": "bob/web",
+   "peerDNS": "ws-web.ws-bob.svc.cluster.local",
+   "ports": [
+    8080
+   ],
+   "status": "linked"
+  }
+ ],
+ "multicast": {
+  "mode": "off"
+ },
+ "mesh": "none",
+ "linksEnabled": true
+}
