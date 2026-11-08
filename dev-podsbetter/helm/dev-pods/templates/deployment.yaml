@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "api.fullname" . }}
+  labels:
+    {{- include "api.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "api.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/catalog: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "api.sa" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: WS_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: WS_CREATE_NAMESPACE
+              value: "0"
+            - name: WS_DRY_RUN
+              value: {{ ternary "1" "0" .Values.api.dryRun | quote }}
+            - name: WS_TIMEOUT
+              value: {{ .Values.api.timeoutSeconds | quote }}
+            - name: WS_CATALOG
+              value: /etc/dev-pods/catalog.json
+            - name: WS_CHART
+              value: /app/helm/dev-pod
+            - name: WS_LOG_DIR
+              value: /app/api/logs
+            {{- with .Values.api.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          volumeMounts:
+            - name: catalog
+              mountPath: /etc/dev-pods
+              readOnly: true
+            {{- if .Values.portal.customHtml }}
+            - name: portal
+              mountPath: /app/web/index.html
+              subPath: index.html
+              readOnly: true
+            {{- end }}
+            - name: logs
+              mountPath: /app/api/logs
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: catalog
+          configMap:
+            name: {{ include "api.fullname" . }}-catalog
+        {{- if .Values.portal.customHtml }}
+        - name: portal
+          configMap:
+            name: {{ include "api.fullname" . }}-portal
+        {{- end }}
+        - name: logs
+          {{- if .Values.logs.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "api.fullname" . }}-logs
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.logs.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "api.fullname" . }}-logs
+  labels:
+    {{- include "api.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.logs.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.logs.persistence.size }}
+{{- end }}

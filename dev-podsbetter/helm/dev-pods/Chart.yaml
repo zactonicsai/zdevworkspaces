@@ -1,0 +1,6 @@
+apiVersion: v2
+name: dev-pods
+description: The developer-pods portal + API. Deploys the web portal, the kubectl/helm API, RBAC and the runtime catalog; developer pods are then created by the API with the bundled dev-pod chart.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -1,0 +1,28 @@
+# Everything here is normally set by the API with --set; the defaults are only for `helm install` by hand.
+name: demo                      # workspace name; the release is ws-<name>, the pod ws-<name>-0
+owner: dev                      # who asked for it (label only)
+runtime: python312              # catalog key, label only
+runtimeFamily: python           # python | java (label only)
+image: registry.example.com/dev/dev-pod-python:3.12   # a pre-built image from images/*/Dockerfile
+imagePullPolicy: IfNotPresent
+imagePullSecret: ""             # name of a docker-registry Secret in the namespace, if the registry is private
+size: medium                    # label only
+partOf: dev-workspaces          # label the API selects on
+replicas: 1                     # 0 = stopped (the API uses kubectl scale)
+repo: ""                        # optional git URL cloned into /home/dev/workspace on first boot
+
+resources:
+  cpu: "2"
+  memory: 4Gi
+
+persistence:
+  enabled: true
+  size: 20Gi
+  storageClass: ""              # "" = cluster default
+
+sshd:
+  enabled: false                # the image starts sshd on sshd.port; put keys in ~/.ssh/authorized_keys
+  port: 2222
+
+nodeSelector: {}
+tolerations: []

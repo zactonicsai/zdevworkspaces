@@ -1,0 +1,73 @@
+# helm upgrade --install dev-pods helm/dev-pods -n dev-workspaces --create-namespace -f my-values.yaml
+
+image:
+  repository: registry.example.com/dev/dev-pods-api     # built from images/api/Dockerfile
+  tag: 0.1.0
+  pullPolicy: IfNotPresent
+imagePullSecrets: []                                      # [{ name: regcred }]
+
+replicaCount: 1          # the in-memory audit buffer is per pod; keep 1, or rely on the JSON logs
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: nginx
+  host: devpods.example.com
+  path: /
+  tls: false
+  tlsSecret: devpods-tls
+  # Put authentication in front of the API: /api/pods/NAME/exec runs commands inside developer pods.
+  annotations: {}
+    # nginx.ingress.kubernetes.io/auth-url: "https://oauth2-proxy.example.com/oauth2/auth"
+    # nginx.ingress.kubernetes.io/auth-signin: "https://oauth2-proxy.example.com/oauth2/start?rd=$scheme://$host$request_uri"
+
+portal:
+  # The portal (web/index.html) ships inside the API image and is served at /.
+  # To serve a modified copy without rebuilding:  --set-file portal.customHtml=web/index.html
+  customHtml: ""
+
+api:
+  dryRun: false
+  timeoutSeconds: 120
+  logLevel: INFO
+  extraEnv: []           # - { name: WS_TIMEOUT, value: "300" }
+
+# The runtime catalog the API serves. Rendered into a ConfigMap and mounted as WS_CATALOG.
+# `registry` is prefixed onto bare image names. Keep it small: a few Python and Java images.
+catalog:
+  registry: registry.example.com/dev
+  imagePullSecret: ""    # Secret (in this namespace) the developer pods use to pull from `registry`
+  storageClass: ""       # "" = cluster default
+  sshd: false            # start sshd in every developer pod
+  runtimes:
+    python312: { label: "Python 3.12", family: python, image: "dev-pod-python:3.12", tools: "git, uv, poetry, pytest, ruff, black, mypy, ipython" }
+    python311: { label: "Python 3.11", family: python, image: "dev-pod-python:3.11", tools: "git, uv, poetry, pytest, ruff, black, mypy, ipython" }
+    java21:    { label: "Java 21 (Temurin JDK)", family: java, image: "dev-pod-java:21", tools: "git, maven 3.9, gradle 8" }
+    java17:    { label: "Java 17 (Temurin JDK)", family: java, image: "dev-pod-java:17", tools: "git, maven 3.9, gradle 8" }
+  sizes:
+    small:  { cpu: "1", memory: 2Gi, disk: 10Gi }
+    medium: { cpu: "2", memory: 4Gi, disk: 20Gi }
+    large:  { cpu: "4", memory: 8Gi, disk: 40Gi }
+
+rbac:
+  create: true           # Role + RoleBinding in the release namespace only
+serviceAccount:
+  create: true
+  name: ""
+
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits:   { cpu: 500m, memory: 512Mi }
+
+# Persist api/logs/ws-api.jsonl across restarts (stdout is always written regardless).
+logs:
+  persistence:
+    enabled: false
+    size: 1Gi
+    storageClass: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

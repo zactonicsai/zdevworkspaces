@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "api.fullname" . }}-catalog
+  labels:
+    {{- include "api.labels" . | nindent 4 }}
+data:
+  catalog.json: |
+    {{- toPrettyJson .Values.catalog | nindent 4 }}
+{{- if .Values.portal.customHtml }}
+---
+# Optional: serve a customised portal page instead of the one baked into the image.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "api.fullname" . }}-portal
+  labels:
+    {{- include "api.labels" . | nindent 4 }}
+data:
+  index.html: |
+    {{- .Values.portal.customHtml | nindent 4 }}
+{{- end }}

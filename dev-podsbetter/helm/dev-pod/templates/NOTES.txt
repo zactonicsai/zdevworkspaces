@@ -1,0 +1,9 @@
+Workspace {{ .Values.name }} ({{ .Values.image }}) is being started in namespace {{ .Release.Namespace }}.
+
+  pod:    {{ include "dev-pod.fullname" . }}-0
+  shell:  kubectl exec -it {{ include "dev-pod.fullname" . }}-0 -n {{ .Release.Namespace }} -- bash
+  logs:   kubectl logs {{ include "dev-pod.fullname" . }}-0 -n {{ .Release.Namespace }}
+  stop:   kubectl scale statefulset {{ include "dev-pod.fullname" . }} -n {{ .Release.Namespace }} --replicas=0
+  start:  kubectl scale statefulset {{ include "dev-pod.fullname" . }} -n {{ .Release.Namespace }} --replicas=1
+
+Files under /home/dev live on PVC home-{{ include "dev-pod.fullname" . }}-0 and survive stop/start.

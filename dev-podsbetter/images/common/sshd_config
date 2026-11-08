@@ -1,0 +1,7 @@
+PidFile /tmp/sshd/pid
+PasswordAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile /home/dev/.ssh/authorized_keys
+PermitRootLogin no
+AllowUsers dev
+Subsystem sftp internal-sftp

@@ -1,0 +1,17 @@
+{
+  "registry": "registry.example.com/dev",
+  "imagePullSecret": "",
+  "storageClass": "",
+  "sshd": false,
+  "runtimes": {
+    "python312": { "label": "Python 3.12", "family": "python", "image": "dev-pod-python:3.12", "tools": "git, uv, poetry, pytest, ruff, black, mypy, ipython" },
+    "python311": { "label": "Python 3.11", "family": "python", "image": "dev-pod-python:3.11", "tools": "git, uv, poetry, pytest, ruff, black, mypy, ipython" },
+    "java21":    { "label": "Java 21 (Temurin JDK)", "family": "java", "image": "dev-pod-java:21", "tools": "git, maven 3.9, gradle 8" },
+    "java17":    { "label": "Java 17 (Temurin JDK)", "family": "java", "image": "dev-pod-java:17", "tools": "git, maven 3.9, gradle 8" }
+  },
+  "sizes": {
+    "small":  { "cpu": "1", "memory": "2Gi", "disk": "10Gi" },
+    "medium": { "cpu": "2", "memory": "4Gi", "disk": "20Gi" },
+    "large":  { "cpu": "4", "memory": "8Gi", "disk": "40Gi" }
+  }
+}

@@ -1,0 +1,16 @@
+dev-pods API deployed to namespace {{ .Release.Namespace }}.
+
+{{- if .Values.ingress.enabled }}
+  Portal:   http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}{{ .Values.ingress.path }}
+  Swagger:  http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}/api/docs
+{{- else }}
+  No ingress. Port-forward:
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "api.fullname" . }} 8080:{{ .Values.service.port }}
+  then open http://localhost:8080/
+{{- end }}
+
+  API log (JSON lines):
+    kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "api.fullname" . }} -f | jq .
+
+Developer pods are created in this same namespace as StatefulSets named ws-<name>,
+using images from {{ .Values.catalog.registry }} (see values.catalog).

@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Developer Pods</title>
+<meta name="description" content="Start, stop and inspect developer pods (Python / Java) on Kubernetes through the dev-pods API. Every kubectl and helm call the API makes is shown on the API log page.">
+<!--
+  web/index.html — the portal. One static file; all state lives in the cluster.
+  * Talks to the Python API (api/app.py) under /api. Served by the API at / , or open it from
+    anywhere with ?api=http://host:8080 to point at another API.
+  * The Tailwind utilities are compiled and inlined below (between the TW markers).
+-->
+<style id="tw">*,:after,:before{--tw-border-spacing-x:0;--tw-border-spacing-y:0;--tw-translate-x:0;--tw-translate-y:0;--tw-rotate:0;--tw-skew-x:0;--tw-skew-y:0;--tw-scale-x:1;--tw-scale-y:1;--tw-pan-x: ;--tw-pan-y: ;--tw-pinch-zoom: ;--tw-scroll-snap-strictness:proximity;--tw-gradient-from-position: ;--tw-gradient-via-position: ;--tw-gradient-to-position: ;--tw-ordinal: ;--tw-slashed-zero: ;--tw-numeric-figure: ;--tw-numeric-spacing: ;--tw-numeric-fraction: ;--tw-ring-inset: ;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-color:rgba(59,130,246,.5);--tw-ring-offset-shadow:0 0 #0000;--tw-ring-shadow:0 0 #0000;--tw-shadow:0 0 #0000;--tw-shadow-colored:0 0 #0000;--tw-blur: ;--tw-brightness: ;--tw-contrast: ;--tw-grayscale: ;--tw-hue-rotate: ;--tw-invert: ;--tw-saturate: ;--tw-sepia: ;--tw-drop-shadow: ;--tw-backdrop-blur: ;--tw-backdrop-brightness: ;--tw-backdrop-contrast: ;--tw-backdrop-grayscale: ;--tw-backdrop-hue-rotate: ;--tw-backdrop-invert: ;--tw-backdrop-opacity: ;--tw-backdrop-saturate: ;--tw-backdrop-sepia: ;--tw-contain-size: ;--tw-contain-layout: ;--tw-contain-paint: ;--tw-contain-style: }::backdrop{--tw-border-spacing-x:0;--tw-border-spacing-y:0;--tw-translate-x:0;--tw-translate-y:0;--tw-rotate:0;--tw-skew-x:0;--tw-skew-y:0;--tw-scale-x:1;--tw-scale-y:1;--tw-pan-x: ;--tw-pan-y: ;--tw-pinch-zoom: ;--tw-scroll-snap-strictness:proximity;--tw-gradient-from-position: ;--tw-gradient-via-position: ;--tw-gradient-to-position: ;--tw-ordinal: ;--tw-slashed-zero: ;--tw-numeric-figure: ;--tw-numeric-spacing: ;--tw-numeric-fraction: ;--tw-ring-inset: ;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-color:rgba(59,130,246,.5);--tw-ring-offset-shadow:0 0 #0000;--tw-ring-shadow:0 0 #0000;--tw-shadow:0 0 #0000;--tw-shadow-colored:0 0 #0000;--tw-blur: ;--tw-brightness: ;--tw-contrast: ;--tw-grayscale: ;--tw-hue-rotate: ;--tw-invert: ;--tw-saturate: ;--tw-sepia: ;--tw-drop-shadow: ;--tw-backdrop-blur: ;--tw-backdrop-brightness: ;--tw-backdrop-contrast: ;--tw-backdrop-grayscale: ;--tw-backdrop-hue-rotate: ;--tw-backdrop-invert: ;--tw-backdrop-opacity: ;--tw-backdrop-saturate: ;--tw-backdrop-sepia: ;--tw-contain-size: ;--tw-contain-layout: ;--tw-contain-paint: ;--tw-contain-style: }
+/*! tailwindcss v3.4.17 | MIT License | https://tailwindcss.com*/*,:after,:before{box-sizing:border-box;border:0 solid #e5e7eb}:after,:before{--tw-content:""}:host,html{line-height:1.5;-webkit-text-size-adjust:100%;-moz-tab-size:4;-o-tab-size:4;tab-size:4;font-family:IBM Plex Sans,system-ui,-apple-system,Segoe UI,Roboto,Helvetica Neue,Arial,sans-serif;font-feature-settings:normal;font-variation-settings:normal;-webkit-tap-highlight-color:transparent}body{margin:0;line-height:inherit}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,pre,samp{font-family:IBM Plex Mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-feature-settings:normal;font-variation-settings:normal;font-size:1em}small{font-size:80%}sub,sup{font-size:75%;line-height:0;position:relative;vertical-align:baseline}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}button,input,optgroup,select,textarea{font-family:inherit;font-feature-settings:inherit;font-variation-settings:inherit;font-size:100%;font-weight:inherit;line-height:inherit;letter-spacing:inherit;color:inherit;margin:0;padding:0}button,select{text-transform:none}button,input:where([type=button]),input:where([type=reset]),input:where([type=submit]){-webkit-appearance:button;background-color:transparent;background-image:none}:-moz-focusring{outline:auto}:-moz-ui-invalid{box-shadow:none}progress{vertical-align:baseline}::-webkit-inner-spin-button,::-webkit-outer-spin-button{height:auto}[type=search]{-webkit-appearance:textfield;outline-offset:-2px}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-file-upload-button{-webkit-appearance:button;font:inherit}summary{display:list-item}blockquote,dd,dl,figure,h1,h2,h3,h4,h5,h6,hr,p,pre{margin:0}fieldset{margin:0}fieldset,legend{padding:0}menu,ol,ul{list-style:none;margin:0;padding:0}dialog{padding:0}textarea{resize:vertical}input::-moz-placeholder,textarea::-moz-placeholder{opacity:1;color:#9ca3af}input::placeholder,textarea::placeholder{opacity:1;color:#9ca3af}[role=button],button{cursor:pointer}:disabled{cursor:default}audio,canvas,embed,iframe,img,object,svg,video{display:block;vertical-align:middle}img,video{max-width:100%;height:auto}[hidden]:where(:not([hidden=until-found])){display:none}:root{--bg:#fff;--surface:#f4f4f4;--surface-2:#e0e0e0;--text:#161616;--text-2:#525252;--border:#e0e0e0;--border-strong:#8d8d8d;--link:#0f62fe;--link-hover:#0043ce;--focus:#0f62fe;--ok:#198038;--warn:#f1c21b;--danger:#da1e28;--info-bg:#edf5ff;--ok-bg:#defbe6;--warn-bg:#fcf4d6;--danger-bg:#fff1f1;color-scheme:light}html.dark{--bg:#000;--surface:#161616;--surface-2:#262626;--text:#f4f4f4;--text-2:#c6c6c6;--border:#393939;--border-strong:#6f6f6f;--link:#78a9ff;--link-hover:#a6c8ff;--focus:#fff;--ok:#42be65;--warn:#f1c21b;--danger:#fa4d56;--info-bg:#001d6c;--ok-bg:#044317;--warn-bg:#483700;--danger-bg:#520408;color-scheme:dark}html{font-size:16px}body{background:var(--bg);color:var(--text)}a{color:var(--link);text-decoration:underline;text-underline-offset:2px}a:hover{color:var(--link-hover)}:focus-visible{outline:2px solid var(--focus);outline-offset:1px}h1[tabindex="-1"]:focus,main:focus{outline:none}.container{width:100%}@media (min-width:640px){.container{max-width:640px}}@media (min-width:768px){.container{max-width:768px}}@media (min-width:1024px){.container{max-width:1024px}}@media (min-width:1280px){.container{max-width:1280px}}@media (min-width:1536px){.container{max-width:1536px}}html.compact #nav-toggle{display:inline-flex}html.compact #site-nav{display:none}html.compact #site-nav-mobile{display:block}html.compact #site-nav-mobile.hidden,html.compact #user-chip{display:none}html.compact [class*="lg:grid-cols-"]{grid-template-columns:repeat(1,minmax(0,1fr))}html.compact [class*="lg:col-span-"]{grid-column:auto}html.compact .lg\:block{display:none}.btn{display:inline-flex;align-items:center;gap:.5rem;min-height:2.75rem;padding:0 1rem;font-weight:500;border:1px solid transparent;cursor:pointer;text-decoration:none;line-height:1.2}.btn:disabled{opacity:.5;cursor:not-allowed}.btn-primary{background:#0f62fe;color:#fff}.btn-primary:hover:not(:disabled){background:#0353e9}html.dark .btn-primary{background:#4589ff;color:#000}html.dark .btn-primary:hover:not(:disabled){background:#78a9ff}html.dark .btn-secondary:hover:not(:disabled){filter:brightness(1.2)}.btn-sm{min-height:2rem;padding:0 .75rem;font-size:.875rem}.tile{background:var(--surface);border-left:3px solid transparent;padding:1rem 1.25rem}.card{background:var(--bg);border:1px solid var(--border)}html.dark .card{background:var(--surface);border-color:var(--border)}.field{display:block;margin-bottom:1rem}.field>span.lbl{display:block;font-size:.875rem;color:var(--text-2);margin-bottom:.375rem}.input,.select,.textarea{width:100%;background:var(--surface);color:var(--text);border:0;border-bottom:1px solid var(--border-strong);padding:.625rem .75rem;font:inherit}.input:focus,.select:focus,.textarea:focus{outline:2px solid var(--focus);outline-offset:-2px}.textarea{font-family:IBM Plex Mono,ui-monospace,monospace;font-size:.875rem;min-height:6rem}.help{font-size:.8125rem;color:var(--text-2);margin-top:.25rem}.check-card{display:flex;gap:.75rem;align-items:flex-start;padding:.875rem 1rem;background:var(--surface);border:1px solid transparent;cursor:pointer}.check-card:hover{border-color:var(--border-strong)}.check-card.selected{border-color:var(--link);box-shadow:inset 3px 0 0 var(--link)}.check-card input{margin-top:.25rem;width:1.125rem;height:1.125rem;accent-color:#0f62fe;flex:none}html.dark .check-card input{accent-color:#4589ff}.pill{display:inline-flex;align-items:center;gap:.375rem;padding:.125rem .625rem;font-size:.75rem;font-weight:500;border-radius:9999px;background:var(--surface-2);color:var(--text);white-space:nowrap}.pill-warn{background:var(--warn-bg);color:#8e6a00}html.dark .pill-warn{color:#f1c21b}.chip{display:inline-block;padding:.125rem .5rem;font-size:.75rem;background:var(--surface-2);color:var(--text)}.term{color:var(--link);-webkit-text-decoration:underline dotted;text-decoration:underline dotted;text-underline-offset:3px;background:none;border:0;padding:0;font:inherit;cursor:help}.prose{line-height:1.65;max-width:72ch}.prose .callout,.prose ol,.prose p,.prose pre,.prose table,.prose ul{margin:0 0 .9em}.prose ul{list-style:disc;padding-left:1.4em}.prose ol{list-style:decimal;padding-left:1.4em}.prose li{margin:.25em 0}.prose h3{font-size:1.125em;font-weight:600;margin:1.4em 0 .5em}.prose code,code{font-family:IBM Plex Mono,ui-monospace,monospace;font-size:.9em;background:var(--surface-2);padding:.05em .3em}.prose pre,pre.cmd{background:#161616;color:#f4f4f4;padding:.875rem 1rem;overflow-x:auto;font-size:.875em;line-height:1.5}html.dark .prose pre,html.dark pre.cmd{background:#262626}.prose pre code,pre.cmd code{background:transparent;padding:0;color:inherit;font-size:1em}.prose kbd,kbd{font-family:inherit;font-size:.85em;border:solid var(--border-strong);border-width:1px 1px 2px;padding:0 .35em}.callout{padding:.75rem 1rem;border-left:3px solid}.step-num{width:2.5rem;height:2.5rem;display:inline-flex;align-items:center;justify-content:center;background:#0f62fe;color:#fff;font-weight:600}html.dark .step-num{background:#4589ff;color:#000}.progress{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:.25rem}.progress-step{padding-top:.5rem;font-size:.8125rem;color:var(--text-2);text-align:left;background:none;border:0;border-top:2px solid var(--border);cursor:pointer}.progress-step.current,.progress-step.done{border-top-color:var(--link);color:var(--text)}.progress-step.current{font-weight:600}.progress-step:disabled{cursor:default}@media (max-width:640px){.progress-step span.lbl{display:none}}.modal{width:min(44rem,calc(100vw - 2rem));max-height:calc(100vh - 2rem);padding:0;border:1px solid var(--border);background:var(--bg);color:var(--text);box-shadow:0 2px 6px rgba(0,0,0,.3)}html.dark .modal{background:var(--surface)}.modal::backdrop{background:hsla(0,0%,9%,.55)}.toast{pointer-events:auto;min-width:16rem;max-width:28rem;padding:.75rem 1rem;background:#161616;color:#f4f4f4;border-left:3px solid #0f62fe;box-shadow:0 2px 6px rgba(0,0,0,.3);font-size:.9375rem}html.dark .toast{background:#f4f4f4;color:#161616}.status-Pending,.status-Starting{color:#8e6a00}html.dark .status-Pending,html.dark .status-Starting{color:#f1c21b}@keyframes spin{to{transform:rotate(1turn)}}.visible{visibility:visible}.static{position:static}.fixed{position:fixed}.sticky{position:sticky}.top-0{top:0}.z-10{z-index:10}.mx-auto{margin-left:auto;margin-right:auto}.mb-1{margin-bottom:.25rem}.mb-2{margin-bottom:.5rem}.mb-3{margin-bottom:.75rem}.mb-4{margin-bottom:1rem}.mb-5{margin-bottom:1.25rem}.ml-4{margin-left:1rem}.ml-auto{margin-left:auto}.mt-1{margin-top:.25rem}.mt-4{margin-top:1rem}.mt-6{margin-top:1.5rem}.mt-8{margin-top:2rem}.mt-auto{margin-top:auto}.block{display:block}.inline-block{display:inline-block}.flex{display:flex}.inline-flex{display:inline-flex}.table{display:table}.grid{display:grid}.hidden{display:none}.h-14{height:3.5rem}.h-5{height:1.25rem}.h-8{height:2rem}.min-h-14{min-height:3.5rem}.min-h-screen{min-height:100vh}.\!w-auto{width:auto!important}.w-5{width:1.25rem}.w-8{width:2rem}.max-w-6xl{max-width:72rem}.max-w-full{max-width:100%}.list-decimal{list-style-type:decimal}.grid-cols-\[auto_1fr\]{grid-template-columns:auto 1fr}.flex-col{flex-direction:column}.flex-wrap{flex-wrap:wrap}.items-start{align-items:flex-start}.items-end{align-items:flex-end}.items-center{align-items:center}.justify-center{justify-content:center}.justify-between{justify-content:space-between}.gap-1{gap:.25rem}.gap-2{gap:.5rem}.gap-3{gap:.75rem}.gap-4{gap:1rem}.gap-6{gap:1.5rem}.gap-x-3{-moz-column-gap:.75rem;column-gap:.75rem}.gap-y-1{row-gap:.25rem}.space-y-1>:not([hidden])~:not([hidden]){--tw-space-y-reverse:0;margin-top:calc(.25rem*(1 - var(--tw-space-y-reverse)));margin-bottom:calc(.25rem*var(--tw-space-y-reverse))}.divide-y>:not([hidden])~:not([hidden]){--tw-divide-y-reverse:0;border-top-width:calc(1px*(1 - var(--tw-divide-y-reverse)));border-bottom-width:calc(1px*var(--tw-divide-y-reverse))}.overflow-hidden{overflow:hidden}.break-all{word-break:break-all}.border-b{border-bottom-width:1px}.p-0{padding:0}.p-3{padding:.75rem}.p-4{padding:1rem}.p-5{padding:1.25rem}.p-6{padding:1.5rem}.px-4{padding-left:1rem;padding-right:1rem}.py-2{padding-top:.5rem;padding-bottom:.5rem}.py-6{padding-top:1.5rem;padding-bottom:1.5rem}.pl-5{padding-left:1.25rem}.pt-1{padding-top:.25rem}.text-center{text-align:center}.text-2xl{font-size:1.5rem;line-height:2rem}.text-3xl{font-size:1.875rem;line-height:2.25rem}.text-lg{font-size:1.125rem;line-height:1.75rem}.text-sm{font-size:.875rem;line-height:1.25rem}.text-xs{font-size:.75rem;line-height:1rem}.font-light{font-weight:300}.font-medium{font-weight:500}.font-semibold{font-weight:600}.lowercase{text-transform:lowercase}.leading-tight{line-height:1.25}.text-white{--tw-text-opacity:1;color:rgb(255 255 255/var(--tw-text-opacity,1))}.underline{text-decoration-line:underline}.filter{filter:var(--tw-blur) var(--tw-brightness) var(--tw-contrast) var(--tw-grayscale) var(--tw-hue-rotate) var(--tw-invert) var(--tw-saturate) var(--tw-sepia) var(--tw-drop-shadow)}@media (prefers-reduced-motion:reduce){*,:after,:before{animation-duration:.01ms!important;transition-duration:.01ms!important}}@media print{#banner,#toasts,.no-print,footer,header{display:none!important}body{background:#fff;color:#000}}@media (min-width:640px){html.compact .sm\:hidden#site-nav-mobile{display:none}}@media (min-width:768px){html.compact .md\:hidden#site-nav-mobile{display:none}}.hover\:underline:hover{text-decoration-line:underline}@media (min-width:640px){.sm\:inline{display:inline}.sm\:hidden{display:none}.sm\:grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}.sm\:grid-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}.sm\:grid-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}.sm\:flex-nowrap{flex-wrap:nowrap}.sm\:gap-3{gap:.75rem}.sm\:py-0{padding-top:0;padding-bottom:0}}@media (min-width:768px){.md\:flex{display:flex}.md\:hidden{display:none}.md\:grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}}@media (min-width:1024px){.lg\:col-span-2{grid-column:span 2/span 2}.lg\:col-span-3{grid-column:span 3/span 3}.lg\:grid-cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}.lg\:grid-cols-4{grid-template-columns:repeat(4,minmax(0,1fr))}.lg\:grid-cols-5{grid-template-columns:repeat(5,minmax(0,1fr))}}</style>
+<style>
+  :root{--bg:#fff;--surface:#f4f4f4;--surface2:#e0e0e0;--text:#161616;--muted:#525252;--border:#e0e0e0;--link:#0f62fe;--ok:#198038;--warn:#8e6a00;--danger:#da1e28;--term:#161616}
+  html.dark{--bg:#000;--surface:#161616;--surface2:#262626;--text:#f4f4f4;--muted:#c6c6c6;--border:#393939;--link:#78a9ff;--ok:#42be65;--warn:#f1c21b;--danger:#fa4d56;--term:#0b0b0b}
+  body{background:var(--bg);color:var(--text);font-family:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  a{color:var(--link)}
+  .card{background:var(--surface);border:1px solid var(--border)}
+  .btn{display:inline-flex;align-items:center;gap:.4rem;min-height:2.5rem;padding:0 .9rem;font-weight:500;border:1px solid transparent;cursor:pointer}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn-p{background:#0f62fe;color:#fff}.btn-p:hover:not(:disabled){background:#0353e9}html.dark .btn-p{background:#4589ff;color:#000}
+  .btn-s{background:var(--surface2);color:var(--text)}.btn-o{background:transparent;color:var(--text);border-color:#8d8d8d}.btn-d{background:#da1e28;color:#fff}.btn-g{background:transparent;color:var(--link)}
+  .btn-sm{min-height:2rem;padding:0 .7rem;font-size:.85rem}
+  .input,.select{width:100%;min-width:0;max-width:100%;background:var(--surface);color:var(--text);border:0;border-bottom:1px solid #8d8d8d;padding:.55rem .7rem;font:inherit}
+  .input:focus,.select:focus{outline:2px solid var(--link);outline-offset:-2px}
+  .check{display:flex;gap:.6rem;align-items:flex-start;padding:.7rem .8rem;background:var(--surface);border:1px solid transparent;cursor:pointer}
+  .check.on{border-color:var(--link);box-shadow:inset 3px 0 0 var(--link)}.check input{margin-top:.25rem;accent-color:#0f62fe}
+  .pill{display:inline-flex;align-items:center;gap:.35rem;padding:.1rem .6rem;font-size:.75rem;font-weight:500;border-radius:999px;background:var(--surface2)}
+  .pill::before{content:"";width:.5rem;height:.5rem;border-radius:999px;background:currentColor}
+  .pill.nodot::before{display:none}
+  .st-Running{color:var(--ok);background:rgba(36,161,72,.12)}.st-Stopped{color:var(--muted)}.st-Starting,.st-Pending,.st-ContainerCreating{color:var(--warn);background:rgba(241,194,27,.15)}.st-Failed,.st-Error,.st-CrashLoopBackOff{color:var(--danger);background:rgba(218,30,40,.12)}
+  .tab{padding:.6rem .9rem;border-bottom:2px solid transparent;color:var(--muted);cursor:pointer;white-space:nowrap}.tab[aria-selected=true]{color:var(--text);border-color:var(--link);font-weight:600}
+  .term{background:var(--term);color:#e0e0e0;font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;font-size:.85rem;line-height:1.45;padding:.75rem 1rem;height:22rem;flex:1;overflow:auto;white-space:pre-wrap;word-break:break-all}
+  .term .p{color:#42be65}.term .err{color:#fa4d56}.term .dim{color:#8d8d8d}.term .hl{color:#78a9ff}
+  .term-in{display:flex;gap:.5rem;background:var(--term);padding:.4rem 1rem .75rem;font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.85rem}
+  .term-in .p{color:#42be65;white-space:nowrap}
+  .term-in input{flex:1;min-width:0;background:transparent;border:0;color:#f4f4f4;outline:0;font:inherit}
+  .log{background:var(--term);color:#c6c6c6;font-family:ui-monospace,Menlo,monospace;font-size:.78rem;padding:.6rem .8rem;max-height:14rem;overflow:auto;white-space:pre-wrap}
+  code,.mono{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:.9em;background:var(--surface2);padding:.05em .3em}
+  .tile{background:var(--surface);border-left:3px solid var(--link);padding:.9rem 1rem}
+  .chip{display:inline-block;padding:.1rem .45rem;font-size:.72rem;background:var(--surface2)}
+  .callout{padding:.6rem .9rem;border-left:3px solid var(--link);background:rgba(15,98,254,.08);font-size:.9rem}
+  .callout.bad{border-color:var(--danger);background:rgba(218,30,40,.08)}
+  .spin{display:inline-block;width:.9em;height:.9em;border:2px solid currentColor;border-right-color:transparent;border-radius:999px;animation:s .8s linear infinite;vertical-align:-.1em}@keyframes s{to{transform:rotate(360deg)}}
+  .toast{position:fixed;right:1rem;bottom:1rem;background:#161616;color:#f4f4f4;padding:.6rem .9rem;border-left:3px solid #0f62fe;font-size:.9rem;z-index:50;max-width:28rem}html.dark .toast{background:#f4f4f4;color:#161616}
+  .toast.bad{border-color:#da1e28}
+  .audit{border-left:3px solid var(--border);padding:.5rem .75rem;background:var(--surface);font-size:.85rem}
+  .audit.ok{border-color:var(--ok)}.audit.bad{border-color:var(--danger)}
+  .audit .cmd{display:block;white-space:pre-wrap;word-break:break-all;background:var(--term);color:#e0e0e0;padding:.4rem .6rem;margin:.3rem 0;font-size:.8rem}
+  .audit details>summary{cursor:pointer;color:var(--muted);font-size:.8rem}
+  .audit pre{background:var(--term);color:#c6c6c6;padding:.4rem .6rem;font-size:.75rem;max-height:12rem;overflow:auto;white-space:pre-wrap;margin:.25rem 0}
+  .dot{display:inline-block;width:.5rem;height:.5rem;border-radius:999px;background:var(--muted)}.dot.ok{background:var(--ok)}.dot.bad{background:var(--danger)}
+</style>
+</head>
+<body class="min-h-screen">
+<header class="sticky top-0 z-10 border-b" style="border-color:var(--border);background:var(--bg)">
+  <div class="max-w-6xl mx-auto px-4 min-h-14 py-2 sm:py-0 flex flex-wrap sm:flex-nowrap items-center gap-2 sm:gap-3">
+    <span class="inline-block w-5 h-5" style="background:#0f62fe"></span>
+    <span class="font-semibold hidden sm:inline">Developer <span class="font-light">Pods</span></span>
+    <span class="pill nodot" id="mode-pill" title="API status">…</span>
+    <nav class="ml-4 hidden md:flex items-center text-sm" role="tablist" id="tabs">
+      <button class="tab" role="tab" data-tab="home" aria-selected="true">Home</button>
+      <button class="tab" role="tab" data-tab="create">Create</button>
+      <button class="tab" role="tab" data-tab="list">My pods</button>
+      <button class="tab" role="tab" data-tab="audit">API log</button>
+      <button class="tab" role="tab" data-tab="how">How it works</button>
+    </nav>
+    <div class="ml-auto flex items-center gap-2 max-w-full">
+      <select id="tab-select" class="select md:hidden !w-auto text-sm" aria-label="Page"><option value="home">Home</option><option value="create">Create</option><option value="list">My pods</option><option value="audit">API log</option><option value="how">How it works</option></select>
+      <button id="theme" class="btn btn-o btn-sm" title="Switch between light and dark">Theme</button>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-6xl mx-auto px-4 py-6" id="main"></main>
+<div id="toast" class="toast hidden" role="status"></div>
+
+<script>
+"use strict";
+/* ============================================================ API client */
+const API = (new URLSearchParams(location.search).get("api") || (location.protocol.startsWith("http") ? location.origin : "http://localhost:8080")).replace(/\/$/, "");
+async function api(method, path, body) {
+  const r = await fetch(API + path, { method, headers: body ? { "Content-Type": "application/json" } : {}, body: body ? JSON.stringify(body) : undefined });
+  let data = null; try { data = await r.json(); } catch (e) { /* no body */ }
+  if (!r.ok) { const msg = (data && (data.error || data.detail)) || `${r.status} ${r.statusText}`; const err = new Error(typeof msg === "string" ? msg : JSON.stringify(msg)); err.data = data; throw err; }
+  return data;
+}
+
+/* ============================================================ state (UI only — the cluster is the source of truth) */
+const KEY = "devpods.ui";
+let S = { tab: "home", sel: null, theme: null, owner: "", terms: {} };
+let CAT = null, PODS = [], AUDIT = [], HEALTH = null, LAST_ERR = null, DETAIL = null, LOGS = null, EVENTS = null;
+function load() { try { S = Object.assign(S, JSON.parse(localStorage.getItem(KEY)) || {}); } catch (e) {} }
+function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const clock = t => t ? new Date(t).toTimeString().slice(0, 8) : "—";
+const ago = t => { if (!t) return "—"; const s = (Date.now() - new Date(t)) / 1e3; return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s / 60)} min ago` : s < 86400 ? `${Math.floor(s / 3600)} h ago` : `${Math.floor(s / 86400)} d ago`; };
+function toast(m, bad) { const t = $("#toast"); t.textContent = m; t.classList.remove("hidden"); t.classList.toggle("bad", !!bad); clearTimeout(t._t); t._t = setTimeout(() => t.classList.add("hidden"), bad ? 6000 : 2500); }
+function busy(b, on) { if (!b) return; b.disabled = on; if (on) { b.dataset.label = b.innerHTML; b.innerHTML = '<span class="spin"></span> ' + b.textContent; } else if (b.dataset.label) b.innerHTML = b.dataset.label; }
+
+/* ============================================================ data loading */
+async function refreshHealth() { try { HEALTH = await api("GET", "/api/health"); LAST_ERR = null; } catch (e) { HEALTH = null; LAST_ERR = e.message; } paintMode(); }
+async function refreshCatalog() { if (!CAT) CAT = await api("GET", "/api/catalog"); }
+async function refreshPods() { try { PODS = (await api("GET", "/api/pods")).items; LAST_ERR = null; } catch (e) { LAST_ERR = e.message; } }
+async function refreshAudit() { try { AUDIT = (await api("GET", "/api/audit?limit=300")).items; } catch (e) { LAST_ERR = e.message; } }
+async function refreshDetail() {
+  if (!S.sel) return;
+  try {
+    DETAIL = await api("GET", `/api/pods/${S.sel}`);
+    if (DETAIL.pod) { [LOGS, EVENTS] = await Promise.all([api("GET", `/api/pods/${S.sel}/logs?tail=200`), api("GET", `/api/pods/${S.sel}/events`)]); } else { LOGS = null; EVENTS = null; }
+  } catch (e) { if (/not found/i.test(e.message)) { DETAIL = null; S.sel = null; setTab("list"); toast(e.message, true); return; } LAST_ERR = e.message; }
+}
+function paintMode() {
+  const p = $("#mode-pill"); if (!p) return;
+  if (!HEALTH) { p.textContent = "API offline"; p.style.cssText = "background:#da1e28;color:#fff"; p.title = LAST_ERR || ""; }
+  else if (HEALTH.dryRun) { p.textContent = "DRY-RUN"; p.style.cssText = "background:#f1c21b;color:#161616"; p.title = "WS_DRY_RUN=1: the API logs the kubectl/helm commands it would run but fakes the cluster"; }
+  else { p.textContent = HEALTH.namespace; p.style.cssText = "background:var(--ok);color:#fff"; p.title = "namespace " + HEALTH.namespace; }
+}
+
+/* ============================================================ views */
+let draft = { name: "", runtime: "", size: "medium", repo: "" };
+function setTab(t) { S.tab = t; save(); render(); loadFor(t); }
+async function loadFor(t) {
+  await refreshCatalog().catch(e => { LAST_ERR = e.message; });
+  if (t === "home" || t === "list") await refreshPods();
+  if (t === "audit") await refreshAudit();
+  if (t === "detail") { await refreshDetail(); await refreshAudit(); }
+  render();
+}
+function render() {
+  document.querySelectorAll("[data-tab]").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === S.tab)); $("#tab-select").value = S.tab;
+  const m = $("#main"); const v = { home, create, list, audit, how, detail }[S.tab] || home;
+  const focused = document.activeElement && document.activeElement.id; const val = focused ? document.activeElement.value : null;
+  m.innerHTML = (LAST_ERR ? `<div class="callout bad mb-4"><strong>API error:</strong> ${esc(LAST_ERR)} <span style="color:var(--muted)">(${esc(API)})</span></div>` : "") + v();
+  if (focused && $("#" + focused)) { const el = $("#" + focused); el.focus(); if (val !== null && "value" in el && el.type !== "checkbox") el.value = val; }
+  if (S.tab === "detail") { const t = $("#term"); if (t) t.scrollTop = 1e9; const l = $("#podlog"); if (l) l.scrollTop = 1e9; }
+  paintMode();
+}
+const running = () => PODS.filter(w => w.status === "Running").length;
+const RT = k => (CAT && CAT.runtimes[k]) || { label: k, family: "", image: "" };
+const SZ = k => (CAT && CAT.sizes[k]) || { cpu: "?", memory: "?", disk: "?" };
+
+function home() { return `
+<section class="grid lg:grid-cols-5 gap-6 items-start">
+  <div class="lg:col-span-3">
+    <p class="text-sm font-medium mb-1" style="color:var(--link)">Kubernetes developer pods — Python and Java</p>
+    <h1 class="text-3xl font-light leading-tight mb-3">Your own Linux pod in the cluster, <span class="font-semibold">ready in about a minute.</span></h1>
+    <p class="text-lg mb-5" style="color:var(--muted)">Pick a runtime and a size; the API runs <code>helm upgrade --install</code> with the <code>dev-pod</code> chart and the pod appears in namespace <code>${esc(HEALTH ? HEALTH.namespace : "…")}</code>. Stop and start keep your <code>/home/dev</code> volume. Every kubectl and helm command the API runs is on the <button class="underline" data-go="audit">API log</button> page.</p>
+    <div class="flex flex-wrap gap-2"><button class="btn btn-p" data-go="create">Create a pod</button><button class="btn btn-o" data-go="how">How it works</button></div>
+  </div>
+  <div class="lg:col-span-2 card p-4 text-sm">
+    <h2 class="font-semibold mb-2">API</h2>
+    <div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1"><span style="color:var(--muted)">Endpoint</span><code class="break-all">${esc(API)}</code><span style="color:var(--muted)">Status</span><span>${HEALTH ? (HEALTH.dryRun ? "up (dry-run, no real cluster)" : "up") : "offline"}</span><span style="color:var(--muted)">Namespace</span><code>${esc(HEALTH ? HEALTH.namespace : "—")}</code><span style="color:var(--muted)">Chart</span><code class="break-all text-xs">${esc(HEALTH ? HEALTH.chart : "—")}</code><span style="color:var(--muted)">Pods</span><span>${PODS.length} total, ${running()} running</span><span style="color:var(--muted)">Docs</span><a href="${esc(API)}/api/docs" target="_blank" rel="noopener">OpenAPI / Swagger</a></div>
+  </div>
+</section>
+<section class="mt-8 grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+  ${[["1", "Choose", "Python or Java, a size"], ["2", "Create", "helm upgrade --install → StatefulSet + PVC"], ["3", "Connect", "kubectl exec, or the shell panel here"], ["4", "Keep working", "/home/dev survives stop/start; the rest does not"]].map(([n, h, p]) => `<div class="tile"><div class="font-semibold text-white inline-flex items-center justify-center w-8 h-8 mb-2" style="background:#0f62fe">${n}</div><h3 class="font-semibold">${h}</h3><p class="text-sm" style="color:var(--muted)">${p}</p></div>`).join("")}
+</section>
+${PODS.length ? `<section class="mt-8"><h2 class="font-semibold mb-2">Your pods</h2>${wsCards()}</section>` : ""}`; }
+
+function create() { const d = draft; const rts = CAT ? Object.entries(CAT.runtimes) : []; const fam = f => rts.filter(([, v]) => v.family === f); return `
+<h1 class="text-2xl font-semibold mb-1">Create a pod</h1><p class="text-sm mb-4" style="color:var(--muted)">One runtime per pod. Nothing is created until you press the button; then the API runs <code>helm upgrade --install ws-NAME helm/dev-pod …</code>.</p>
+<form id="create-form" class="card p-5 grid gap-4" onsubmit="return false">
+  <div class="grid sm:grid-cols-2 gap-4">
+    <label class="block"><span class="text-sm" style="color:var(--muted)">Name</span><input class="input" id="f-name" value="${esc(d.name)}" placeholder="my-service" autocomplete="off"><span class="block text-xs mt-1" style="color:var(--muted)">lowercase, digits, dashes · pod will be <code>ws-${esc(d.name || "NAME")}-0</code></span></label>
+    <label class="block"><span class="text-sm" style="color:var(--muted)">Owner</span><input class="input" id="f-owner" value="${esc(S.owner)}" placeholder="your user id" autocomplete="off"><span class="block text-xs mt-1" style="color:var(--muted)">stored as label <code>workspace/owner</code></span></label>
+  </div>
+  ${["python", "java"].map(f => `<div><span class="text-sm" style="color:var(--muted)">${f === "python" ? "Python" : "Java"}</span><div class="grid sm:grid-cols-2 gap-2 mt-1">${fam(f).map(([k, v]) => `<label class="check ${d.runtime === k ? "on" : ""}"><input type="radio" name="rt" data-rt="${k}" ${d.runtime === k ? "checked" : ""}><span><span class="font-semibold">${esc(v.label)}</span><span class="block text-xs mono" style="color:var(--muted);background:none;padding:0">${esc(v.image)}</span>${v.tools ? `<span class="block text-xs" style="color:var(--muted)">tools: ${esc(v.tools)}</span>` : ""}</span></label>`).join("") || '<span class="text-sm" style="color:var(--muted)">catalog not loaded</span>'}</div></div>`).join("")}
+  <div class="grid sm:grid-cols-2 gap-4">
+    <label class="block"><span class="text-sm" style="color:var(--muted)">Size</span><select class="select" id="f-size">${CAT ? Object.entries(CAT.sizes).map(([k, v]) => `<option value="${k}" ${d.size === k ? "selected" : ""}>${k} — ${v.cpu} CPU · ${v.memory} · ${v.disk} disk</option>`).join("") : ""}</select></label>
+    <label class="block"><span class="text-sm" style="color:var(--muted)">Repository to clone (optional)</span><input class="input" id="f-repo" value="${esc(d.repo)}" placeholder="https://github.com/acme/engine.git"><span class="block text-xs mt-1" style="color:var(--muted)">cloned into /home/dev/workspace on first boot if git is in the image</span></label>
+  </div>
+  <div id="f-err" class="text-sm" style="color:var(--danger)"></div>
+  <div class="flex gap-2"><button class="btn btn-p" id="f-go" ${HEALTH ? "" : "disabled"}>Create pod</button><button class="btn btn-s" id="f-clear" type="button">Clear</button></div>
+  ${d.runtime ? `<div class="callout text-xs mono" style="background:var(--term);color:#e0e0e0;border-color:var(--link)">helm upgrade --install ws-${esc(d.name || "NAME")} helm/dev-pod -n ${esc(HEALTH ? HEALTH.namespace : "NS")} --set runtime=${esc(d.runtime)} --set image=${esc(RT(d.runtime).image)} --set resources.cpu=${SZ(d.size).cpu} --set resources.memory=${SZ(d.size).memory} --set persistence.size=${SZ(d.size).disk} …</div>` : ""}
+</form>`; }
+
+function stPill(w) { const b = w.status === "Starting" || w.status === "Pending" || w.status === "ContainerCreating"; return `<span class="pill st-${esc(w.status)}">${b ? '<span class="spin"></span>' : ""}${esc(w.status)}</span>`; }
+function wsCards() {
+  if (!PODS.length) return `<div class="card p-6 text-center"><p class="mb-3">No pods yet.</p><button class="btn btn-p" data-go="create">Create one</button></div>`;
+  return `<div class="grid md:grid-cols-2 gap-3">${PODS.map(w => `<article class="card p-4 flex flex-col gap-2"><div class="flex items-start justify-between gap-2"><div><button class="text-lg font-semibold hover:underline" data-open="${esc(w.name)}">${esc(w.name)}</button><div class="text-xs" style="color:var(--muted)">${esc(w.namespace)} · ${esc(w.owner || "—")}${w.node ? " · " + esc(w.node) : ""}</div></div>${stPill(w)}</div>
+  <div class="flex flex-wrap gap-1"><span class="chip">${esc(w.runtimeLabel)}</span><span class="chip" style="opacity:.8">${esc(w.image || "")}</span></div>
+  <div class="text-xs" style="color:var(--muted)">${esc(w.size)} · ${SZ(w.size).cpu} CPU · ${SZ(w.size).memory} · disk ${SZ(w.size).disk} · created ${ago(w.createdAt)}${w.restarts ? ` · ${w.restarts} restarts` : ""}</div>
+  <div class="flex flex-wrap gap-2 mt-auto pt-1"><button class="btn btn-s btn-sm" data-open="${esc(w.name)}">Open</button>${w.status === "Stopped" ? `<button class="btn btn-p btn-sm" data-start="${esc(w.name)}">Start</button>` : w.status === "Running" ? `<button class="btn btn-o btn-sm" data-stop="${esc(w.name)}">Stop</button>` : ""}<button class="btn btn-g btn-sm" data-del="${esc(w.name)}">Delete…</button></div></article>`).join("")}</div>`;
+}
+function list() { return `<div class="flex items-end justify-between gap-3 mb-4"><div><h1 class="text-2xl font-semibold">My pods</h1><p class="text-sm" style="color:var(--muted)">Live from <code>kubectl get statefulsets,pods -l app.kubernetes.io/part-of=dev-workspaces</code>; refreshes every 5 s.</p></div><div class="flex gap-2"><button class="btn btn-o" id="refresh">Refresh</button><button class="btn btn-p" data-go="create">Create</button></div></div>${wsCards()}`; }
+
+function detail() {
+  const w = DETAIL || PODS.find(p => p.name === S.sel); if (!w) return `<p>Loading ${esc(S.sel)}…</p>`;
+  const live = w.status === "Running"; const term = S.terms[w.name] || [];
+  const mine = AUDIT.filter(a => a.workspace === w.name).slice(0, 20);
+  return `<nav class="text-sm mb-2"><button class="underline" data-go="list">My pods</button> › ${esc(w.name)}</nav>
+<div class="flex flex-wrap items-center justify-between gap-3 mb-4"><h1 class="text-2xl font-semibold flex items-center gap-3">${esc(w.name)} ${stPill(w)}</h1>
+<div class="flex gap-2">${w.status === "Stopped" ? `<button class="btn btn-p" data-start="${esc(w.name)}">Start</button>` : w.status === "Running" ? `<button class="btn btn-o" data-stop="${esc(w.name)}">Stop</button>` : ""}<button class="btn btn-s" id="refresh">Refresh</button><button class="btn btn-g" data-del="${esc(w.name)}">Delete…</button></div></div>
+<div class="grid lg:grid-cols-3 gap-4">
+  <section class="lg:col-span-2 card p-0 overflow-hidden flex flex-col"><div class="px-4 py-2 flex items-center justify-between text-sm" style="background:var(--surface2)"><span class="font-semibold">Shell — <span class="mono">kubectl exec ${esc(w.pod || "ws-" + w.name + "-0")} -- sh -lc …</span></span><span style="color:var(--muted)">${live ? "one command per line" : w.status === "Stopped" ? "pod stopped — press Start" : "booting…"}</span></div>
+    <div class="term" id="term">${term.map(l => `<div class="${l.c || ""}">${esc(l.s)}</div>`).join("") || `<div class="dim">${live ? `Each line runs through the API as kubectl exec and is written to the API log. Try: ${w.family === "java" ? "java -version" : "python3 --version"}, whoami, ls -la ~, cat ~/README-workspace.md` : "[pod is not running]"}</div>`}</div>
+    <form class="term-in" id="term-form" onsubmit="return false"><span class="p">dev@${esc(w.pod || "ws-" + w.name + "-0")}:~$</span><input id="term-in" autocomplete="off" spellcheck="false" aria-label="command" ${live ? "" : "disabled"}></form></section>
+  <aside class="flex flex-col gap-4">
+    <section class="card p-4 text-sm"><h2 class="font-semibold mb-2">Details</h2><div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1"><span style="color:var(--muted)">Runtime</span><span>${esc(w.runtimeLabel)}${RT(w.runtime).tools ? `<span class="block text-xs" style="color:var(--muted)">${esc(RT(w.runtime).tools)}</span>` : ""}</span><span style="color:var(--muted)">Image</span><span class="mono text-xs break-all">${esc(w.image || "—")}</span><span style="color:var(--muted)">Size</span><span>${esc(w.size)} · ${SZ(w.size).cpu} CPU · ${SZ(w.size).memory} · ${SZ(w.size).disk}</span><span style="color:var(--muted)">Owner</span><span>${esc(w.owner || "—")}</span><span style="color:var(--muted)">Release</span><span class="mono text-xs">${esc(w.release)}</span><span style="color:var(--muted)">Pod</span><span class="mono text-xs">${esc(w.pod || "—")}${w.node ? " on " + esc(w.node) : ""}${w.podIP ? " · " + esc(w.podIP) : ""}</span><span style="color:var(--muted)">Namespace</span><span class="mono text-xs">${esc(w.namespace)}</span><span style="color:var(--muted)">Volume</span><span class="mono text-xs">home-${esc(w.release)}-0</span><span style="color:var(--muted)">Created</span><span>${ago(w.createdAt)}</span></div>
+      <div class="mt-3 text-xs" style="color:var(--muted)">From your terminal:</div><pre class="log" style="max-height:none">kubectl exec -it ${esc(w.pod || "ws-" + w.name + "-0")} -n ${esc(w.namespace)} -- bash</pre></section>
+    <section class="card p-4 text-sm"><h2 class="font-semibold mb-1">Pod log <span class="text-xs font-light" style="color:var(--muted)">kubectl logs --tail=200</span></h2><div class="log" id="podlog">${LOGS ? esc(LOGS.logs) : "(stopped: start the pod to see its log)"}</div></section>
+    <section class="card p-4 text-sm"><h2 class="font-semibold mb-1">Events</h2>${EVENTS && EVENTS.events.length ? `<div class="log" style="max-height:10rem">${EVENTS.events.slice(-15).map(e => `${esc(clock(e.time))} ${esc(e.type)} ${esc(e.reason)}: ${esc(e.message)}`).join("\n")}</div>` : `<div class="text-xs" style="color:var(--muted)">none</div>`}</section>
+  </aside>
+</div>
+<section class="mt-6"><h2 class="font-semibold mb-2">API calls for this pod <span class="text-xs font-light" style="color:var(--muted)">(last ${mine.length}; full list on <button class="underline" data-go="audit">API log</button>)</span></h2>${mine.length ? `<div class="grid gap-2">${mine.map(auditRow).join("")}</div>` : `<p class="text-sm" style="color:var(--muted)">No calls recorded yet in this API process.</p>`}</section>`;
+}
+
+function auditRow(a) { return `<div class="audit ${a.ok ? "ok" : "bad"}"><div class="flex flex-wrap items-center gap-2"><span class="mono text-xs" style="color:var(--muted)">#${a.id} ${esc(clock(a.ts))}</span><span class="chip">${esc(a.tool)}</span>${a.action ? `<span class="chip">${esc(a.action)}</span>` : ""}${a.workspace ? `<button class="chip underline" data-open="${esc(a.workspace)}" style="cursor:pointer">${esc(a.workspace)}</button>` : ""}<span class="ml-auto text-xs" style="color:${a.ok ? "var(--ok)" : "var(--danger)"}">exit ${a.exit_code} · ${a.duration_ms} ms${a.dry_run ? " · dry-run" : ""}</span></div><code class="cmd">$ ${esc(a.cmd)}</code>${a.stdout || a.stderr ? `<details><summary>output (${(a.stdout || "").length + (a.stderr || "").length} chars) · request ${esc(a.request_id)}</summary>${a.stdout ? `<pre>${esc(a.stdout)}</pre>` : ""}${a.stderr ? `<pre style="color:#fa4d56">${esc(a.stderr)}</pre>` : ""}</details>` : `<div class="text-xs" style="color:var(--muted)">no output · request ${esc(a.request_id)}</div>`}</div>`; }
+let auditFilter = { tool: "", ws: "" };
+function audit() {
+  const items = AUDIT.filter(a => (!auditFilter.tool || a.tool === auditFilter.tool) && (!auditFilter.ws || a.workspace === auditFilter.ws));
+  const wsNames = [...new Set(AUDIT.map(a => a.workspace).filter(Boolean))];
+  return `<div class="flex flex-wrap items-end justify-between gap-3 mb-3"><div><h1 class="text-2xl font-semibold">API log</h1><p class="text-sm" style="color:var(--muted)">Every <code>kubectl</code> and <code>helm</code> command the API process has run, newest first. The same records go to stdout and <code>api/logs/ws-api.jsonl</code> as JSON lines.</p></div>
+  <div class="flex gap-2 items-center"><select class="select !w-auto text-sm" id="af-tool"><option value="">all tools</option><option value="kubectl" ${auditFilter.tool === "kubectl" ? "selected" : ""}>kubectl</option><option value="helm" ${auditFilter.tool === "helm" ? "selected" : ""}>helm</option></select><select class="select !w-auto text-sm" id="af-ws"><option value="">all pods</option>${wsNames.map(n => `<option value="${esc(n)}" ${auditFilter.ws === n ? "selected" : ""}>${esc(n)}</option>`).join("")}</select><button class="btn btn-o" id="refresh">Refresh</button></div></div>
+  <div class="flex gap-4 text-sm mb-3" style="color:var(--muted)"><span>${items.length} shown</span><span><span class="dot ok"></span> ${items.filter(a => a.ok).length} ok</span><span><span class="dot bad"></span> ${items.filter(a => !a.ok).length} failed</span><span>${items.filter(a => a.tool === "helm").length} helm · ${items.filter(a => a.tool === "kubectl").length} kubectl</span></div>
+  ${items.length ? `<div class="grid gap-2">${items.map(auditRow).join("")}</div>` : '<div class="card p-6 text-center">Nothing recorded yet. Create or open a pod.</div>'}`;
+}
+function how() { return `<h1 class="text-2xl font-semibold mb-3">How it works</h1>
+<div class="grid md:grid-cols-2 gap-3 text-sm">
+${[["Portal action", "What the API runs"], ["Create", "helm upgrade --install ws-NAME helm/dev-pod -n NS --set image=… --set resources.cpu=… (StatefulSet + headless Service + PVC)"], ["My pods / Home", "kubectl get statefulsets -l app.kubernetes.io/part-of=dev-workspaces -o json and kubectl get pods … -o json"], ["Stop", "kubectl scale statefulset ws-NAME --replicas=0 — the pod goes away, the PVC stays"], ["Start", "kubectl scale statefulset ws-NAME --replicas=1 — same volume, fresh container"], ["Delete", "helm uninstall ws-NAME; with purge also kubectl delete pvc -l workspace/name=NAME"], ["Pod log", "kubectl logs ws-NAME-0 -c dev --tail=200"], ["Events", "kubectl get events --field-selector involvedObject.name=ws-NAME-0"], ["Shell panel", "kubectl exec ws-NAME-0 -c dev -- sh -lc 'COMMAND'"], ["API log page", "GET /api/audit — the in-memory ring buffer of those calls (argv, exit code, duration, stdout, stderr, request id)"]].map(([a, b], i) => `<div class="card p-3 ${i === 0 ? "font-semibold" : ""}"><div>${a}</div></div><div class="card p-3 ${i === 0 ? "font-semibold" : "mono text-xs"}" style="${i ? "background:var(--term);color:#e0e0e0" : ""}">${esc(b)}</div>`).join("")}
+</div>
+<h2 class="text-lg font-semibold mt-6 mb-2">Runtimes</h2>
+<div class="grid sm:grid-cols-2 gap-2 text-sm">${CAT ? Object.entries(CAT.runtimes).map(([k, v]) => `<div class="card p-3"><div class="font-semibold">${esc(v.label)} <span class="chip">${esc(k)}</span></div><div class="mono text-xs" style="background:none;padding:0;color:var(--muted)">${esc(v.image)}</div>${v.tools ? `<div class="text-xs" style="color:var(--muted)">${esc(v.tools)}</div>` : ""}</div>`).join("") : ""}</div>
+<h2 class="text-lg font-semibold mt-6 mb-2">Running it</h2>
+<pre class="log" style="max-height:none">cd api && pip install -r requirements.txt
+WS_NAMESPACE=dev-workspaces uvicorn app:app --host 0.0.0.0 --port 8080     # real cluster (uses your kubeconfig)
+WS_DRY_RUN=1 uvicorn app:app --port 8080                                   # no cluster: commands are logged, not run
+tail -f api/logs/ws-api.jsonl | jq .                                       # the same audit trail as JSON lines</pre>
+<p class="text-sm mt-4" style="color:var(--muted)">The API is <code>api/app.py</code> (FastAPI), deployed with <code>helm/dev-pods</code>. Developer pods use <code>helm/dev-pod</code> and the pre-built images from <code>images/*/Dockerfile</code>. This file is <code>web/index.html</code>.</p>`; }
+
+/* ============================================================ actions */
+async function act(btn, fn, okMsg) { busy(btn, true); try { const r = await fn(); if (okMsg) toast(typeof okMsg === "function" ? okMsg(r) : okMsg); LAST_ERR = null; } catch (e) { toast(e.message + (e.data && e.data.cmd ? ` — ${e.data.cmd}` : ""), true); } finally { busy(btn, false); await loadFor(S.tab); } }
+document.addEventListener("click", e => {
+  const b = e.target.closest("button,[data-go]"); if (!b) return;
+  if (b.dataset.tab) { setTab(b.dataset.tab); return } if (b.dataset.go) { setTab(b.dataset.go); return }
+  if (b.dataset.open) { S.sel = b.dataset.open; DETAIL = null; LOGS = null; EVENTS = null; setTab("detail"); return }
+  if (b.dataset.start) { act(b, () => api("POST", `/api/pods/${b.dataset.start}/start`), `${b.dataset.start}: start requested (kubectl scale --replicas=1)`); return }
+  if (b.dataset.stop) { if (confirm(`Stop ${b.dataset.stop}? Running programs end; files under /home/dev are kept.`)) act(b, () => api("POST", `/api/pods/${b.dataset.stop}/stop`), `${b.dataset.stop}: stopping (kubectl scale --replicas=0)`); return }
+  if (b.dataset.del) { const n = b.dataset.del; const purge = confirm(`Delete ${n}?\n\nOK = also delete its home volume (files gone)\nCancel = keep going to the next question`); if (!purge && !confirm(`Delete ${n} but KEEP the volume? (a new pod named ${n} gets the files back)`)) return; act(b, async () => { const r = await api("DELETE", `/api/pods/${n}?purge=${purge}`); if (S.sel === n) { S.sel = null; S.tab = "list"; } return r; }, `${n} deleted (helm uninstall${purge ? " + delete pvc" : ""})`); return }
+  if (b.id === "f-go") { doCreate(b); return }
+  if (b.id === "f-clear") { draft = { name: "", runtime: "", size: "medium", repo: "" }; render(); return }
+  if (b.id === "refresh") { act(b, async () => {}); return }
+  if (b.id === "theme") { const d = !document.documentElement.classList.contains("dark"); document.documentElement.classList.toggle("dark", d); S.theme = d ? "dark" : "light"; save(); return }
+});
+document.addEventListener("change", e => {
+  const t = e.target;
+  if (t.dataset.rt) { draft.runtime = t.dataset.rt; render(); }
+  else if (t.id === "f-size") { draft.size = t.value; render(); } else if (t.id === "tab-select") setTab(t.value);
+  else if (t.id === "af-tool") { auditFilter.tool = t.value; render(); } else if (t.id === "af-ws") { auditFilter.ws = t.value; render(); }
+});
+document.addEventListener("input", e => { if (e.target.id === "f-name") draft.name = e.target.value.trim().toLowerCase(); if (e.target.id === "f-repo") draft.repo = e.target.value.trim(); if (e.target.id === "f-owner") { S.owner = e.target.value.trim(); save(); } });
+async function doCreate(btn) {
+  const err = $("#f-err"); const name = draft.name;
+  if (!draft.runtime) { err.textContent = "Pick a runtime."; return } if (!/^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$/.test(name)) { err.textContent = "Name: lowercase letters, digits and dashes only (max 32)."; return }
+  if (PODS.some(p => p.name === name) && !confirm(`${name} exists. Re-apply the chart to it (helm upgrade; the volume is kept)?`)) return;
+  busy(btn, true);
+  try { const r = await api("POST", "/api/pods", { name, runtime: draft.runtime, size: draft.size, owner: S.owner || "dev", repo: draft.repo || null }); toast(`Creating ${name}… (helm #${r.audit_id})`); draft = { name: "", runtime: "", size: "medium", repo: "" }; S.sel = name; DETAIL = null; setTab("detail"); }
+  catch (e) { err.textContent = e.message + (e.data && e.data.stderr ? " — " + e.data.stderr : ""); busy(btn, false); }
+}
+document.addEventListener("submit", async e => {
+  if (e.target.id !== "term-form") return; e.preventDefault(); const w = DETAIL || PODS.find(p => p.name === S.sel); if (!w || w.status !== "Running") return;
+  const inp = $("#term-in"); const line = inp.value.trim(); inp.value = ""; if (!line) return;
+  const t = S.terms[w.name] = S.terms[w.name] || []; t.push({ s: `dev@${w.pod}:~$ ${line}`, c: "p" });
+  if (line === "clear") { S.terms[w.name] = []; render(); return }
+  try { const r = await api("POST", `/api/pods/${w.name}/exec`, { command: line }); if (r.stdout) t.push({ s: r.stdout.replace(/\n$/, "") }); if (r.stderr) t.push({ s: r.stderr.replace(/\n$/, ""), c: "err" }); if (r.exit_code) t.push({ s: `[exit ${r.exit_code}] · API log #${r.audit_id}`, c: "dim" }); }
+  catch (e) { t.push({ s: e.message, c: "err" }); }
+  S.terms[w.name] = t.slice(-400); save(); render(); await refreshAudit(); render();
+});
+
+/* ============================================================ boot the page */
+load();
+if (S.theme === "dark" || (S.theme === null && matchMedia("(prefers-color-scheme: dark)").matches)) document.documentElement.classList.add("dark");
+if (S.tab === "detail" && !S.sel) S.tab = "list";
+render(); refreshHealth().then(() => loadFor(S.tab));
+setInterval(async () => { await refreshHealth(); if (S.tab === "list" || S.tab === "home") { await refreshPods(); render(); } if (S.tab === "detail" && document.activeElement !== $("#term-in")) { await refreshDetail(); render(); } if (S.tab === "audit") { await refreshAudit(); render(); } }, 5000);
+</script>
+</body>
+</html>

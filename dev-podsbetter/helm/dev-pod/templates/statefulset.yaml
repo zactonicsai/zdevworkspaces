@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "dev-pod.fullname" . }}
+  labels:
+    {{- include "dev-pod.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "dev-pod.fullname" . }}
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "dev-pod.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dev-pod.labels" . | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      {{- with .Values.imagePullSecret }}
+      imagePullSecrets:
+        - name: {{ . }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: dev
+          image: {{ .Values.image | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          # the image's ENTRYPOINT is /opt/dev-pod/entrypoint.sh (see images/common/entrypoint.sh)
+          workingDir: /home/dev
+          env:
+            - name: HOME
+              value: /home/dev
+            - name: WORKSPACE_NAME
+              value: {{ .Values.name | quote }}
+            - name: WORKSPACE_OWNER
+              value: {{ .Values.owner | quote }}
+            - name: WORKSPACE_RUNTIME
+              value: {{ .Values.runtime | quote }}
+            - name: WORKSPACE_RUNTIME_FAMILY
+              value: {{ .Values.runtimeFamily | quote }}
+            - name: WORKSPACE_REPO
+              value: {{ .Values.repo | quote }}
+            - name: WORKSPACE_SSHD
+              value: {{ ternary "1" "0" .Values.sshd.enabled | quote }}
+            - name: WORKSPACE_SSH_PORT
+              value: {{ .Values.sshd.port | quote }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          {{- if .Values.sshd.enabled }}
+          ports:
+            - name: ssh
+              containerPort: {{ .Values.sshd.port }}
+          {{- end }}
+          resources:
+            requests:
+              cpu: {{ .Values.resources.cpu | quote }}
+              memory: {{ .Values.resources.memory | quote }}
+            limits:
+              cpu: {{ .Values.resources.cpu | quote }}
+              memory: {{ .Values.resources.memory | quote }}
+          {{- if .Values.persistence.enabled }}
+          volumeMounts:
+            - name: home
+              mountPath: /home/dev
+          {{- end }}
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/home/dev/.first-boot-done"]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: home
+        labels:
+          {{- include "dev-pod.selectorLabels" . | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}
