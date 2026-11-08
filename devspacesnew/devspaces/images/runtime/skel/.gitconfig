@@ -1,0 +1,11 @@
+# Seeded once; `git config --global` edits land here and persist on your volume.
+[init]
+	defaultBranch = main
+[pull]
+	rebase = true
+[push]
+	autoSetupRemote = true
+[fetch]
+	prune = true
+[core]
+	editor = nano

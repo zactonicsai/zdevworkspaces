@@ -1,0 +1,9 @@
+{
+ "sshPublicKeys": [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGm7gPZQ0cYQhh3v4u5n9Vd2D5rR0f7w3q1Yx2cZbWvK demo@laptop"
+ ],
+ "gitName": "Demo Developer",
+ "gitEmail": "demo@example.com",
+ "artifactoryUser": "",
+ "hasArtifactoryToken": false
+}

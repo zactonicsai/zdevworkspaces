@@ -1,0 +1,13 @@
+{
+ "snapshots": [
+  {
+   "name": "ws-api-home-20261101-120000",
+   "namespace": "ws-demo",
+   "drive": "ws-api-home",
+   "readyToUse": true,
+   "restoreSize": "30Gi",
+   "languages": "go,python",
+   "createdAt": "2026-11-01T12:00:00Z"
+  }
+ ]
+}

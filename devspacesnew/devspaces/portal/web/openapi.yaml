@@ -1,0 +1,515 @@
+openapi: 3.0.3
+info:
+  title: Developer Workspaces API
+  version: "dev"
+  description: |
+    The HTTP API served by the portal (`portal/`). The web UI, the Go CLI (`clients/wsctl`)
+    and automation all use it. Every call runs **as the caller**: the portal impersonates
+    the developer towards Kubernetes, so RBAC decides what works (the same RBAC `kubectl`
+    users get). Only the *sharing* operations marked `x-portal-privileged` use the portal's
+    own service account, after the portal has verified the caller owns the resource.
+
+    ## Authentication
+    * **Browser session**: an authenticating proxy (oauth2-proxy with Entra ID, Google, …)
+      in front of the portal sets `X-Forwarded-Email` / `X-Forwarded-Groups`; the portal
+      trusts these only from `-trusted-proxies`. State-changing calls must also send
+      `X-Requested-With: devspaces-portal` (CSRF guard).
+    * **Bearer token** (CLI, automation, Azure API Management): `Authorization: Bearer <JWT>`
+      issued by the configured OIDC issuer (`-oidc-issuer`, `-oidc-audience`; for Azure:
+      `https://login.microsoftonline.com/<tenant>/v2.0` and `api://devspaces`). The user is
+      the `-oidc-user-claim` (default `preferred_username`, falling back to `email`); groups
+      come from the `groups` claim. No CSRF header is needed with a bearer token.
+    * Errors are `{"error": "message"}` with a 4xx/5xx status.
+servers:
+  - url: https://workspaces.example.com
+  - url: http://localhost:8080
+    description: local demo (`portal -mock` or the kind cluster)
+security:
+  - bearer: []
+  - session: []
+tags:
+  - { name: me }
+  - { name: catalog }
+  - { name: workspaces }
+  - { name: drives, description: "Home drives (the PVC behind /home/dev) and shared drives (RWX, mounted under /shared)" }
+  - { name: snapshots }
+  - { name: sharing, description: "Give another developer SSH access to a workspace or a mount of a drive" }
+  - { name: networking, description: "Pod-to-pod networking: DNS names, links between developers' workspaces, projects" }
+  - { name: tunnel }
+
+paths:
+  /api/me:
+    get:
+      tags: [me]
+      summary: Who am I, which namespaces do I have
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+                  namespaces:
+                    type: array
+                    items: { $ref: "#/components/schemas/NamespaceInfo" }
+                  projects:
+                    type: array
+                    description: project namespaces the caller is a member of
+                    items: { $ref: "#/components/schemas/Project" }
+                  auth:
+                    type: string
+                    enum: [session, bearer, dev]
+  /api/catalog:
+    get:
+      tags: [catalog]
+      summary: Languages, tools, profiles, sizes, storage choices, networking options
+      responses:
+        "200": { description: the public part of catalog.json, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+
+  /api/workspaces:
+    get:
+      tags: [workspaces]
+      summary: List my workspaces (personal namespaces, lab namespace and project namespaces)
+      parameters:
+        - { name: ns, in: query, schema: { type: string }, description: only this namespace }
+        - { name: shared, in: query, schema: { type: boolean }, description: "also include workspaces other developers shared with me" }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workspaces: { type: array, items: { $ref: "#/components/schemas/Workspace" } }
+                  sharedWithMe: { type: array, items: { $ref: "#/components/schemas/Workspace" } }
+    post:
+      tags: [workspaces]
+      summary: Create (or re-create with changes, keeping the home drive)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WorkspaceRequest" }
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+                  namespace: { type: string }
+                  deployKey: { type: string, description: "public half of the git deploy key (empty unless gitAuth=deploy-key)" }
+                  hostKeyFingerprint: { type: string }
+                  spec: { type: object, additionalProperties: true }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/workspaces/{name}:
+    parameters: [ { $ref: "#/components/parameters/name" }, { $ref: "#/components/parameters/ns" } ]
+    get:
+      tags: [workspaces]
+      summary: Details plus SSH connection info
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workspace: { $ref: "#/components/schemas/Workspace" }
+                  ssh: { $ref: "#/components/schemas/SSHInfo" }
+                  deployKey: { type: string }
+                  publicAddr: { type: string }
+                  network: { $ref: "#/components/schemas/Network" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [workspaces]
+      summary: Delete the workspace; the home drive is KEPT unless purge=true
+      description: |
+        Deleting removes the StatefulSet, Service, Secrets and NetworkPolicies. The home
+        drive (PVC `ws-<name>-home`) stays and shows up under `/api/drives` as *detached*;
+        a later create with the same name, or with `fromDrive`, re-attaches it. `purge=true`
+        first marks the drive deletable (`devspaces.io/allow-delete=true`) — an admission
+        policy rejects deleting a home drive without that mark — and then deletes it.
+      parameters:
+        - { name: purge, in: query, schema: { type: boolean, default: false } }
+      responses:
+        "200": { description: deleted, content: { application/json: { schema: { type: object, properties: { deleted: { type: string }, driveKept: { type: boolean } } } } } }
+  /api/workspaces/{name}/start:
+    post: { tags: [workspaces], summary: Scale to 1, parameters: [ { $ref: "#/components/parameters/name" } ], responses: { "200": { description: ok } } }
+  /api/workspaces/{name}/stop:
+    post: { tags: [workspaces], summary: Scale to 0 (drive kept), parameters: [ { $ref: "#/components/parameters/name" } ], responses: { "200": { description: ok } } }
+  /api/workspaces/{name}/idle:
+    put:
+      tags: [workspaces]
+      summary: Change the idle timeout
+      parameters: [ { $ref: "#/components/parameters/name" } ]
+      requestBody: { content: { application/json: { schema: { type: object, properties: { idleTimeout: { type: string, example: "4h" } } } } } }
+      responses: { "200": { description: ok } }
+  /api/workspaces/{name}/keys:
+    post:
+      tags: [workspaces]
+      summary: Add an SSH public key to the workspace's authorized_keys
+      parameters: [ { $ref: "#/components/parameters/name" } ]
+      requestBody: { content: { application/json: { schema: { type: object, required: [publicKey], properties: { publicKey: { type: string } } } } } }
+      responses: { "200": { description: ok } }
+  /api/workspaces/{name}/logs:
+    get:
+      tags: [workspaces]
+      summary: Boot/container log
+      parameters: [ { $ref: "#/components/parameters/name" }, { name: tail, in: query, schema: { type: integer, default: 200 } } ]
+      responses: { "200": { description: ok, content: { text/plain: { schema: { type: string } } } } }
+  /api/workspaces/{name}/tunnel:
+    get:
+      tags: [tunnel]
+      summary: WebSocket tunnel to the workspace's sshd (binary frames ⇄ TCP 2222)
+      description: |
+        Upgrade to a WebSocket; every binary message is raw bytes to/from the workspace's
+        sshd on 127.0.0.1:2222 (the portal bridges through the Kubernetes exec API, so no
+        kubectl is needed on the client). A stopped workspace is started first; the
+        upgrade completes once sshd answers (text frames before that are progress lines).
+        `wsctl proxy NAME` uses this as an OpenSSH ProxyCommand, which is how `wsctl ssh`
+        and VS Code Remote-SSH connect without kubectl.
+      parameters: [ { $ref: "#/components/parameters/name" }, { $ref: "#/components/parameters/ns" } ]
+      responses:
+        "101": { description: switching protocols }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/workspaces/{name}/shares:
+    parameters: [ { $ref: "#/components/parameters/name" } ]
+    get:
+      tags: [sharing]
+      summary: Who has SSH access to this workspace besides me
+      responses: { "200": { description: ok, content: { application/json: { schema: { type: object, properties: { shares: { type: array, items: { $ref: "#/components/schemas/Share" } } } } } } } }
+    post:
+      tags: [sharing]
+      summary: Share the workspace with another developer (pair programming)
+      x-portal-privileged: true
+      description: |
+        Adds the guest's SSH public key(s) — taken from their profile, or from
+        `publicKey` — to the workspace's authorized_keys, and creates a RoleBinding
+        `share-<ws>-<guest>` in the owner's namespace so the guest may `get`/`exec`/
+        `port-forward` that one pod (needed for `ssh` through the tunnel or kubectl).
+        The guest connects with `wsctl ssh <owner>/<name>` or `workspace ssh <owner>/<name>`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user]
+              properties:
+                user: { type: string, description: "guest identity (e-mail / UPN as the API server knows it)" }
+                publicKey: { type: string, description: "guest's key if they have no profile yet" }
+      responses: { "201": { description: shared, content: { application/json: { schema: { $ref: "#/components/schemas/Share" } } } } }
+  /api/workspaces/{name}/shares/{user}:
+    delete:
+      tags: [sharing]
+      summary: Revoke a guest (key removed, RoleBinding deleted)
+      x-portal-privileged: true
+      parameters: [ { $ref: "#/components/parameters/name" }, { name: user, in: path, required: true, schema: { type: string } } ]
+      responses: { "200": { description: revoked } }
+
+  /api/workspaces/{name}/links:
+    parameters: [ { $ref: "#/components/parameters/name" } ]
+    get:
+      tags: [networking]
+      summary: Links (allowed pod-to-pod traffic) between this workspace and other developers' workspaces
+      responses: { "200": { description: ok, content: { application/json: { schema: { type: object, properties: { links: { type: array, items: { $ref: "#/components/schemas/Link" } } } } } } } }
+    post:
+      tags: [networking]
+      summary: Allow traffic between this workspace and a peer (`owner/name`)
+      description: |
+        Creates NetworkPolicies in the caller's namespace that allow ingress from, and
+        egress to, the peer pod. Traffic flows both ways only once the peer has linked
+        back (consent on both sides); `status` says `pending-peer` until then. Workspaces
+        in the same namespace (your own, or a project namespace) never need links.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [peer]
+              properties:
+                peer: { type: string, example: "bob@example.com/api" }
+                ports: { type: array, items: { type: integer }, description: "restrict to these TCP ports (default: all)" }
+      responses: { "201": { description: linked, content: { application/json: { schema: { $ref: "#/components/schemas/Link" } } } } }
+  /api/workspaces/{name}/links/{peer}:
+    delete:
+      tags: [networking]
+      summary: Remove a link
+      parameters: [ { $ref: "#/components/parameters/name" }, { name: peer, in: path, required: true, schema: { type: string }, description: "owner/name, URL-encoded" } ]
+      responses: { "200": { description: removed } }
+  /api/workspaces/{name}/network:
+    get:
+      tags: [networking]
+      summary: DNS name, pod IP, open ports, peers reachable from this workspace
+      parameters: [ { $ref: "#/components/parameters/name" } ]
+      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Network" } } } } }
+
+  /api/drives:
+    get:
+      tags: [drives]
+      summary: My drives — home drives (attached or detached) and shared drives (mine and ones shared with me)
+      responses: { "200": { description: ok, content: { application/json: { schema: { type: object, properties: { drives: { type: array, items: { $ref: "#/components/schemas/Drive" } } } } } } } }
+    post:
+      tags: [drives]
+      summary: Create a shared drive (ReadWriteMany; mount it in several workspaces with `mounts`)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: team-data }
+                size: { type: string, default: "100Gi" }
+                storage: { type: string, description: "a *shared* storage choice from the catalog (default: the one marked default for kind=shared)" }
+      responses: { "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/Drive" } } } } }
+  /api/drives/{name}:
+    parameters: [ { $ref: "#/components/parameters/name" }, { $ref: "#/components/parameters/ns" } ]
+    get:
+      tags: [drives]
+      summary: One drive with its snapshots
+      responses: { "200": { description: ok, content: { application/json: { schema: { type: object, properties: { drive: { $ref: "#/components/schemas/Drive" }, snapshots: { type: array, items: { $ref: "#/components/schemas/Snapshot" } } } } } } } }
+    delete:
+      tags: [drives]
+      summary: Delete a drive for good (marks it deletable, then deletes the PVC)
+      description: Refused while a workspace is attached to it. The StorageClass's `reclaimPolicy: Retain` means the cloud disk still exists for an admin to recover until they remove it.
+      responses: { "200": { description: deleted }, "409": { $ref: "#/components/responses/Error" } }
+  /api/drives/{name}/resize:
+    put:
+      tags: [drives]
+      summary: Grow a drive (never shrink)
+      parameters: [ { $ref: "#/components/parameters/name" } ]
+      requestBody: { content: { application/json: { schema: { type: object, required: [size], properties: { size: { type: string, example: 100Gi } } } } } }
+      responses: { "200": { description: ok } }
+  /api/drives/{name}/snapshots:
+    parameters: [ { $ref: "#/components/parameters/name" } ]
+    get:
+      tags: [snapshots]
+      summary: Snapshots of this drive
+      responses: { "200": { description: ok, content: { application/json: { schema: { type: object, properties: { snapshots: { type: array, items: { $ref: "#/components/schemas/Snapshot" } } } } } } } }
+    post:
+      tags: [snapshots]
+      summary: Take a snapshot (VolumeSnapshot through the CSI driver — on Azure an incremental disk snapshot)
+      requestBody: { content: { application/json: { schema: { type: object, properties: { name: { type: string, description: "default: <drive>-<timestamp>" } } } } } }
+      responses: { "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/Snapshot" } } } } }
+  /api/snapshots/{name}:
+    parameters: [ { $ref: "#/components/parameters/name" }, { $ref: "#/components/parameters/ns" } ]
+    delete: { tags: [snapshots], summary: Delete a snapshot, responses: { "200": { description: deleted } } }
+  /api/drives/{name}/shares:
+    parameters: [ { $ref: "#/components/parameters/name" } ]
+    get:
+      tags: [sharing]
+      summary: Who can mount this shared drive
+      responses: { "200": { description: ok, content: { application/json: { schema: { type: object, properties: { shares: { type: array, items: { $ref: "#/components/schemas/Share" } } } } } } } }
+    post:
+      tags: [sharing]
+      summary: Let another developer mount this shared drive in their workspaces
+      x-portal-privileged: true
+      description: |
+        Only ReadWriteMany drives can be shared. The portal creates, in the guest's
+        namespace, a PersistentVolume + PersistentVolumeClaim `shared-<owner>-<name>` that
+        points at the same CSI volume (same `volumeHandle`/attributes as the owner's PV, i.e.
+        the same Azure Files share / EFS / NFS export). The guest then mounts it with
+        `mounts: ["shared:<owner>/<name>"]`. Home drives (ReadWriteOnce disks) cannot be shared;
+        share the *workspace* instead.
+      requestBody: { content: { application/json: { schema: { type: object, required: [user], properties: { user: { type: string }, readOnly: { type: boolean, default: false } } } } } }
+      responses: { "201": { description: shared, content: { application/json: { schema: { $ref: "#/components/schemas/Share" } } } } }
+  /api/drives/{name}/shares/{user}:
+    delete:
+      tags: [sharing]
+      summary: Stop sharing the drive with that developer (their PVC/PV are removed; data stays)
+      x-portal-privileged: true
+      parameters: [ { $ref: "#/components/parameters/name" }, { name: user, in: path, required: true, schema: { type: string } } ]
+      responses: { "200": { description: revoked } }
+
+  /api/projects:
+    get:
+      tags: [networking]
+      summary: Project namespaces I belong to (a "virtual namespace" where several developers' workspaces live together)
+      responses: { "200": { description: ok, content: { application/json: { schema: { type: object, properties: { projects: { type: array, items: { $ref: "#/components/schemas/Project" } } } } } } } }
+
+  /api/profile:
+    get:
+      tags: [me]
+      summary: My profile (SSH public keys, git identity, defaults)
+      responses: { "200": { description: ok, content: { application/json: { schema: { $ref: "#/components/schemas/Profile" } } } } }
+    put:
+      tags: [me]
+      summary: Save my profile
+      requestBody: { content: { application/json: { schema: { $ref: "#/components/schemas/Profile" } } } }
+      responses: { "200": { description: ok } }
+
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer, bearerFormat: JWT }
+    session: { type: apiKey, in: header, name: X-Forwarded-Email, description: set by the authenticating proxy, never by the client }
+  parameters:
+    name: { name: name, in: path, required: true, schema: { type: string, pattern: "^[a-z0-9]([-a-z0-9]{0,38}[a-z0-9])?$" } }
+    ns: { name: ns, in: query, required: false, schema: { type: string }, description: "namespace, when the name is ambiguous or the resource belongs to a project / another developer (`owner/name` in path is accepted too)" }
+  responses:
+    Error:
+      description: error
+      content: { application/json: { schema: { type: object, properties: { error: { type: string } } } } }
+  schemas:
+    User:
+      type: object
+      properties:
+        name: { type: string, example: alice@example.com }
+        short: { type: string, example: alice }
+        groups: { type: array, items: { type: string } }
+    NamespaceInfo:
+      type: object
+      properties:
+        name: { type: string, example: ws-alice }
+        tier: { type: string, enum: [standard, lab, project] }
+        exists: { type: boolean }
+    Project:
+      type: object
+      properties:
+        name: { type: string, example: checkout }
+        namespace: { type: string, example: ws-proj-checkout }
+        members: { type: array, items: { type: string } }
+        mesh: { type: string, description: "none | istio-ambient" }
+    Workspace:
+      type: object
+      properties:
+        name: { type: string }
+        namespace: { type: string }
+        tier: { type: string }
+        status: { type: string, enum: [Stopped, Pending, Starting, Running, Failed] }
+        ready: { type: boolean }
+        languages: { type: array, items: { type: string } }
+        tools: { type: array, items: { type: string } }
+        profile: { type: string }
+        image: { type: string }
+        node: { type: string }
+        idleTimeout: { type: string }
+        lastActive: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        waiting: { type: string, description: "why it is not Running yet" }
+        expose: { type: boolean }
+        publicAddr: { type: string }
+        owner: { type: string, description: "set for workspaces shared with me" }
+        drive: { type: string, description: "name of the home drive PVC", example: ws-api-home }
+        storage: { type: string, description: "storage choice (catalog alias)" }
+        mounts: { type: array, items: { type: string }, example: ["shared:team-data", "shared:bob/datasets"] }
+        dns: { type: string, example: ws-api.ws-alice.svc.cluster.local }
+        spec: { type: object, additionalProperties: true, description: "the stored devspaces.io/spec annotation" }
+    WorkspaceRequest:
+      type: object
+      required: [languages]
+      properties:
+        name: { type: string, description: "default: first language" }
+        namespace: { type: string, description: "a project namespace (ws-proj-*) instead of my personal one" }
+        languages: { type: array, items: { type: string }, description: "first one picks the image; the rest are installed at boot" }
+        tools: { type: array, items: { type: string } }
+        profile: { type: string, description: "standard | hardware | kernel" }
+        isolation: { type: string }
+        image: { type: string }
+        tag: { type: string }
+        repo: { type: string }
+        branch: { type: string }
+        dotfiles: { type: string }
+        gitAuth: { type: string, enum: [deploy-key, token, none] }
+        gitToken: { type: string }
+        gitTokenUser: { type: string }
+        gitName: { type: string }
+        gitEmail: { type: string }
+        size: { type: string, description: "home drive size (only used when the drive is created)", example: 50Gi }
+        storage: { type: string, description: "storage choice from the catalog (fast | standard | …); default from the catalog" }
+        storageClass: { type: string, description: "raw StorageClass name (admins / advanced); overrides storage" }
+        fromDrive: { type: string, description: "re-attach a detached home drive (PVC name as listed by /api/drives)" }
+        fromSnapshot: { type: string, description: "create the home drive from this snapshot" }
+        mounts: { type: array, items: { type: string }, description: "shared drives to mount under /shared/<name>: 'shared:NAME' (mine) or 'shared:OWNER/NAME' (shared with me)" }
+        cpu: { type: string }
+        memory: { type: string }
+        cpuRequest: { type: string }
+        memoryRequest: { type: string }
+        multicast: { type: boolean }
+        devices: { type: object, additionalProperties: { type: string } }
+        hostPaths: { type: array, items: { type: string } }
+        caps: { type: array, items: { type: string } }
+        expose: { type: boolean }
+        idleTimeout: { type: string }
+        tz: { type: string }
+        sshPublicKeys: { type: array, items: { type: string } }
+    SSHInfo:
+      type: object
+      properties:
+        alias: { type: string, example: ws-api }
+        user: { type: string, example: dev }
+        port: { type: integer, example: 2222 }
+        hostKeyFingerprint: { type: string }
+        knownHostsLine: { type: string }
+        authorizedKeys:
+          type: array
+          items: { type: object, properties: { type: { type: string }, fingerprint: { type: string }, comment: { type: string } } }
+    Drive:
+      type: object
+      properties:
+        name: { type: string, example: ws-api-home }
+        namespace: { type: string }
+        kind: { type: string, enum: [home, shared] }
+        owner: { type: string }
+        size: { type: string }
+        storage: { type: string, description: "catalog alias if known" }
+        storageClass: { type: string }
+        accessModes: { type: array, items: { type: string } }
+        phase: { type: string, description: "PVC phase: Bound | Pending | Lost" }
+        attachedTo: { type: string, description: "workspace currently using it (home drives); empty = detached" }
+        mountedBy: { type: array, items: { type: string }, description: "workspaces mounting a shared drive" }
+        sharedWith: { type: array, items: { type: string } }
+        sharedBy: { type: string, description: "set on drives another developer shared with me" }
+        lastWorkspace: { type: string, description: "annotation devspaces.io/last-workspace" }
+        languages: { type: array, items: { type: string }, description: "what the last workspace on this drive had" }
+        createdAt: { type: string, format: date-time }
+        protected: { type: boolean, description: "true unless devspaces.io/allow-delete=true" }
+    Snapshot:
+      type: object
+      properties:
+        name: { type: string }
+        namespace: { type: string }
+        drive: { type: string }
+        readyToUse: { type: boolean }
+        restoreSize: { type: string }
+        createdAt: { type: string, format: date-time }
+    Share:
+      type: object
+      properties:
+        user: { type: string }
+        kind: { type: string, enum: [workspace, drive] }
+        resource: { type: string }
+        readOnly: { type: boolean }
+        createdAt: { type: string, format: date-time }
+    Link:
+      type: object
+      properties:
+        workspace: { type: string }
+        peer: { type: string, example: "bob@example.com/api" }
+        peerDNS: { type: string, example: ws-api.ws-bob.svc.cluster.local }
+        ports: { type: array, items: { type: integer } }
+        status: { type: string, enum: [linked, pending-peer] }
+    Network:
+      type: object
+      properties:
+        dns: { type: string, example: ws-api.ws-alice.svc.cluster.local }
+        podIP: { type: string }
+        namespace: { type: string }
+        sameNamespace: { type: array, items: { type: string }, description: "other workspaces that can already talk to this one (no link needed)" }
+        links: { type: array, items: { $ref: "#/components/schemas/Link" } }
+        multicast: { type: object, properties: { mode: { type: string }, iface: { type: string } } }
+        mesh: { type: string, description: "none | istio-ambient" }
+    Profile:
+      type: object
+      properties:
+        sshPublicKeys: { type: array, items: { type: string } }
+        gitName: { type: string }
+        gitEmail: { type: string }
+        defaults: { type: object, additionalProperties: true }

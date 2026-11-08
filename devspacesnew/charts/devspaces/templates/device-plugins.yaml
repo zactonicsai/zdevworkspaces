@@ -1,0 +1,74 @@
+# Generated-by-design from deploy/platform/* — keep both in sync (see charts/devspaces/README.md).
+{{- if .Values.devicePlugins.smarterDeviceManager.enabled }}
+# Hardware access for lab-tier workspaces. Three mechanisms, from least to most
+# privileged; the CLI exposes all of them:
+#
+#  1. Device plugins (preferred, works with the standard scheduler):
+#       --device nvidia.com/gpu=1              NVIDIA device plugin / GPU operator
+#       --device smarter-devices/ttyUSB0=1     serial, I2C, SPI, video, USB (config below)
+#       --device intel.com/sriov_netdevice=1   SR-IOV VFs for NIC driver work
+#       --device vfio.io/pci-1234-5678=1       whole PCI function via VFIO (kernel profile / Kata)
+#       --device hugepages-2Mi=1Gi             DPDK-style userspace drivers
+#  2. Host paths, lab profiles only, allow-listed by the admission policy:
+#       --host-path /dev --host-path /sys/bus/pci  (hardware profile already mounts
+#       /lib/modules, /usr/src and /lib/firmware read-only so `make -C /lib/modules/$(uname -r)/build` works)
+#  3. The `hardware` profile is privileged on a tainted node pool with one
+#     workspace per node (pod anti-affinity), so a crashed driver only takes down
+#     the developer who loaded it.
+#
+# Below: smarter-device-manager, the lightweight plugin that exposes arbitrary
+# /dev nodes as extended resources. Install it with its upstream DaemonSet
+# (https://gitlab.com/arm-research/smarter/smarter-device-manager) restricted to
+# the lab pool, and give it this ConfigMap.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: smarter-device-manager
+  namespace: {{ .Release.Namespace }}
+data:
+  conf.yaml: |
+    - devicematch: ^ttyUSB[0-9]*$
+      nummaxdevices: 1
+    - devicematch: ^ttyACM[0-9]*$
+      nummaxdevices: 1
+    - devicematch: ^i2c-[0-9]*$
+      nummaxdevices: 1
+    - devicematch: ^spidev[0-9]\.[0-9]$
+      nummaxdevices: 1
+    - devicematch: ^video[0-9]*$
+      nummaxdevices: 1
+    - devicematch: ^gpiochip[0-9]*$
+      nummaxdevices: 1
+    - devicematch: ^uinput$
+      nummaxdevices: 4
+    - devicematch: ^kvm$
+      nummaxdevices: 8
+    - devicematch: ^fuse$
+      nummaxdevices: 20
+---
+# Lab node pool bootstrap reference (apply through your node provisioning):
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lab-node-prep
+  namespace: {{ .Release.Namespace }}
+data:
+  labels-and-taints.sh: |
+    kubectl label node "$NODE" devspaces.io/lab=true
+    kubectl taint node "$NODE" devspaces.io/lab=true:NoSchedule
+  kernel-headers.sh: |
+    # Needed for out-of-tree module builds in the hardware profile.
+    apt-get install -y "linux-headers-$(uname -r)"   # or dnf install kernel-devel-$(uname -r)
+  vfio.sh: |
+    # Bind a PCI function to vfio-pci so it can be handed to a Kata (kernel profile) workspace.
+    modprobe vfio-pci
+    echo "0000:03:00.0" > /sys/bus/pci/devices/0000:03:00.0/driver/unbind || true
+    echo "vfio-pci" > /sys/bus/pci/devices/0000:03:00.0/driver_override
+    echo "0000:03:00.0" > /sys/bus/pci/drivers_probe
+  nvidia.md: |
+    GPUs: install the NVIDIA GPU Operator (or k8s-device-plugin) with a nodeSelector
+    of devspaces.io/lab=true and the lab toleration; workspaces request
+    `--device nvidia.com/gpu=1`. For CUDA *driver* development use the hardware
+    profile with --host-path /dev --host-path /sys and no device plugin.
+{{- end }}

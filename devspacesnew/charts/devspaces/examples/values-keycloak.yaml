@@ -1,0 +1,44 @@
+# Keycloak (or any OIDC provider) with the browser signing in directly — no oauth2-proxy.
+#   helm upgrade --install devspaces charts/devspaces -n devspaces-system -f values-keycloak.yaml
+# Keycloak setup (realm "dev"):
+#   * client devspaces-portal: public, Standard flow + PKCE S256, Valid redirect URIs https://workspaces.corp.example/*,
+#     Web origins https://workspaces.corp.example; add an "Audience" mapper that puts devspaces-api in the access token;
+#   * client devspaces-api: bearer-only (the audience); client devspaces-cli: public + Device Authorization Grant for wsctl;
+#   * a "groups" mapper (Group Membership, full path off) so the API sees groups.
+# Users must be known to Kubernetes under the same name (API server --oidc-username-claim=preferred_username, or map
+# the e-mail) — the portal impersonates that identity.
+global:
+  registry: registry.corp.example/devspaces
+  tag: "dev"
+portal:
+  backend: python                       # or go (adds the WebSocket SSH tunnel for wsctl ssh)
+  replicas: 2
+  oidc:                                 # API side: validate the browser's / wsctl's bearer tokens
+    issuer: https://keycloak.corp.example/realms/dev
+    audience: devspaces-api
+    userClaim: preferred_username
+    groupsClaim: groups
+  cliLogin:                             # wsctl login --portal https://workspaces.corp.example (device-code flow)
+    tenant: ""                          # Keycloak has no tenant; wsctl reads issuer from /.well-known/devspaces
+    clientId: devspaces-cli
+    scope: openid profile email offline_access
+  ui:                                   # browser side: PKCE login against the same realm
+    oidc:
+      issuer: https://keycloak.corp.example/realms/dev
+      clientId: devspaces-portal
+      scope: openid profile email
+    stubToggle: false
+oauth2Proxy:
+  enabled: false                        # the browser signs in itself; the API checks tokens
+networkPolicy:
+  enabled: true
+  ingressFrom:                          # without oauth2-proxy the ingress controller talks to the portal directly
+    - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
+ingress:
+  enabled: true
+  className: nginx
+  host: workspaces.corp.example
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"   # WebSocket tunnel (Go backend)
+  tls: { enabled: true, secretName: workspaces-tls }

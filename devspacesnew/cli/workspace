@@ -1,0 +1,2004 @@
+#!/usr/bin/env python3
+"""
+workspace — on-demand Kubernetes developer workspaces.
+
+Single-file CLI, Python 3.9+, standard library only. Every cluster operation
+goes through `kubectl`, so your kubeconfig, contexts, auth plugins and RBAC
+apply exactly as they do on the command line.
+
+  workspace create --lang rust --tools cmake,git
+  workspace cluster                   # which cluster/context am I on, nodes, workspaces, pods
+  workspace ssh rust                  # or in VS Code: Remote-SSH → "ws-rust"
+  workspace code rust                 # opens VS Code on /workspace
+  workspace stop rust                 # pod removed, home volume kept
+  workspace start rust                # also happens automatically on ssh
+  workspace delete rust               # pod gone, HOME DRIVE kept (shows in `drives list`)
+  workspace delete rust --purge       # really deletes the drive too
+
+Home drives, sharing, networking:
+  workspace drives list                              # my home/shared drives, attached or not
+  workspace create api --lang go --from-drive ws-rust-home   # put a new workspace on an old drive
+  workspace drives snapshot rust                     # VolumeSnapshot; --from-snapshot restores
+  workspace drives create-shared team-data --size 100Gi      # RWX folder; --mount shared:team-data
+  workspace share add rust bob@corp.example --key bob.pub    # pair programming (bob: workspace ssh alice/rust)
+  workspace link add api --to bob@corp.example/api  # allow pod-to-pod traffic across namespaces
+  workspace net api                                  # DNS name, peers, links
+
+Platform admins:
+  workspace admin onboard alice --lab                # per-developer namespaces
+  workspace admin project create checkout --members alice,bob   # a shared "virtual namespace"
+  workspace admin reap --all-namespaces              # what the reaper CronJob runs
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import datetime as dt
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from urllib.parse import urlparse
+
+VERSION = "1.1.0"
+
+SYSTEM_NS = os.environ.get("WORKSPACE_SYSTEM_NAMESPACE", "devspaces-system")
+CATALOG_CM = "workspace-catalog"
+CONFIG_DIR = Path(os.environ.get("WORKSPACE_CONFIG_DIR", str(Path.home() / ".config" / "workspace")))
+CONFIG_FILE = CONFIG_DIR / "config.json"
+KEYS_DIR = CONFIG_DIR / "keys"
+KNOWN_HOSTS = CONFIG_DIR / "known_hosts"
+SSH_CONFIG = Path.home() / ".ssh" / "config"
+
+LABEL_WS = "devspaces.io/workspace"
+LABEL_LANG = "devspaces.io/lang"
+LABEL_PROFILE = "devspaces.io/profile"
+LABEL_TIER = "devspaces.io/tier"
+LABEL_TENANT = "devspaces.io/tenant"
+LABEL_MANAGED = "app.kubernetes.io/managed-by"
+ANN_IDLE = "devspaces.io/idle-timeout"
+ANN_ACTIVE = "devspaces.io/last-active"
+ANN_SPEC = "devspaces.io/spec"
+ANN_NETWORKS = "k8s.v1.cni.cncf.io/networks"
+LABEL_DRIVE = "devspaces.io/drive"            # home | shared | shared-mount
+LABEL_KIND = "devspaces.io/kind"              # namespace kind: project
+LABEL_SHARE = "devspaces.io/share"            # on RoleBindings: workspace
+LABEL_GUEST = "devspaces.io/guest"
+LABEL_LINK = "devspaces.io/link"              # on peer-* NetworkPolicies
+ANN_LAST_WS = "devspaces.io/last-workspace"
+ANN_LANGS = "devspaces.io/languages"
+ANN_STORAGE = "devspaces.io/storage"
+ANN_ALLOW_DELETE = "devspaces.io/allow-delete"
+ANN_GUEST_USER = "devspaces.io/guest-user"
+ANN_PEER = "devspaces.io/peer"
+ANN_MEMBERS = "devspaces.io/members"
+SHARED_MOUNT_PATH = "/shared"
+
+SSH_PORT = 2222
+DEV_USER = "dev"
+DEV_GID = 1000
+NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,38}[a-z0-9])?$")
+NO_NS = object()  # sentinel: run kubectl without -n
+
+# Mirrors deploy/platform/catalog.json. The cluster copy always wins; this is
+# only used when the ConfigMap cannot be read (first install, no RBAC yet).
+DEFAULT_CATALOG = {
+    "registry": "workerspaces/workspace-portal",
+    "tag": "2026.10",
+    "pullSecret": "",
+    "defaults": {"profile": "standard", "isolation": "userns", "cpu": "4", "memory": "8Gi",
+                 "cpuRequest": "1", "memoryRequest": "2Gi", "ephemeralStorage": "20Gi",
+                 "size": "30Gi", "storageClass": "", "idleTimeout": "4h"},
+    "languages": {l: {"image": f"workspace-{l}"} for l in ("base", "python", "go", "rust", "java", "node", "cpp")},
+    "tools": {t: {} for t in ("git", "cmake", "gdb", "docker-cli", "kubectl", "protobuf", "mcast",
+                              "python", "go", "rust", "node", "java", "cpp")},
+    "profiles": {
+        "standard": {"tier": "standard",
+                     "capabilities": ["AUDIT_WRITE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "MKNOD",
+                                      "NET_BIND_SERVICE", "SETFCAP", "SETGID", "SETPCAP", "SETUID", "SYS_CHROOT"]},
+        "hardware": {"tier": "lab", "privileged": True, "isolation": "none",
+                     "hostPaths": ["/lib/modules", "/usr/src", "/lib/firmware"],
+                     "nodeSelector": {"devspaces.io/lab": "true"},
+                     "tolerations": [{"key": "devspaces.io/lab", "operator": "Equal", "value": "true", "effect": "NoSchedule"}],
+                     "exclusiveNode": True},
+        "kernel": {"tier": "lab", "isolation": "kata",
+                   "capabilities": ["AUDIT_WRITE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "MKNOD", "NET_ADMIN",
+                                    "NET_BIND_SERVICE", "NET_RAW", "SETFCAP", "SETGID", "SETPCAP", "SETUID", "SYS_ADMIN",
+                                    "SYS_CHROOT", "SYS_MODULE", "SYS_PTRACE", "SYS_RAWIO", "IPC_LOCK"],
+                   "nodeSelector": {"devspaces.io/lab": "true"},
+                   "tolerations": [{"key": "devspaces.io/lab", "operator": "Equal", "value": "true", "effect": "NoSchedule"}]},
+    },
+    "isolation": {"userns": {"hostUsers": False}, "gvisor": {"runtimeClass": "gvisor"},
+                  "kata": {"runtimeClass": "kata"}, "none": {}},
+    "networking": {"clusterCIDRs": ["10.244.0.0/16", "10.96.0.0/12"],
+                   "blockedEgress": ["169.254.169.254/32"],
+                   "multicast": {"nad": "devspaces-system/mcast", "iface": "net1"}},
+}
+
+
+# --------------------------------------------------------------------------- utils
+class CliError(Exception):
+    pass
+
+
+def info(msg: str) -> None:
+    print(f"workspace: {msg}", file=sys.stderr)
+
+
+def warn(msg: str) -> None:
+    print(f"workspace: warning: {msg}", file=sys.stderr)
+
+
+def utcnow() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def parse_ts(s: str) -> dt.datetime:
+    return dt.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+
+
+def parse_duration(s: str) -> int:
+    """'4h', '90m', '1d12h', '0'/'off' → seconds."""
+    s = (s or "").strip().lower()
+    if s in ("", "0", "off", "none", "never"):
+        return 0
+    m = re.fullmatch(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", s)
+    if not m or not any(m.groups()):
+        raise CliError(f"bad duration {s!r} (examples: 30m, 4h, 1d12h, off)")
+    d, h, mi, sec = (int(x or 0) for x in m.groups())
+    return ((d * 24 + h) * 60 + mi) * 60 + sec
+
+
+def human_duration(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+    return f"{seconds // 86400}d{(seconds % 86400) // 3600}h"
+
+
+def b64d(s: str) -> str:
+    return base64.b64decode(s).decode()
+
+
+def sanitize_user(u: str) -> str:
+    u = u.lower().split("@")[0]
+    u = re.sub(r"[^a-z0-9-]+", "-", u).strip("-")
+    return u[:40] or "dev"
+
+
+def tenant_namespace(user: str, tier: str) -> str:
+    return f"ws-{user}" + ("-lab" if tier == "lab" else "")
+
+
+def git_host(url: str) -> str:
+    if not url:
+        return ""
+    m = re.match(r"^(?:[\w.-]+@)?([\w.-]+):", url)
+    if m and "://" not in url:  # scp-like: git@github.com:org/repo.git
+        return m.group(1)
+    return urlparse(url).hostname or ""
+
+
+def repo_dirname(url: str) -> str:
+    tail = re.sub(r"\.git/?$", "", url.rstrip("/")).rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    return re.sub(r"[^A-Za-z0-9._-]", "-", tail) or "repo"
+
+
+def storage_choices(cat: dict) -> list[dict]:
+    return list((cat.get("storage") or {}).get("choices") or [])
+
+
+def storage_choice(cat: dict, name: str | None, kind: str = "home") -> dict:
+    """Resolve --storage NAME (or the default) to a catalog choice of the given kind."""
+    choices = [c for c in storage_choices(cat) if c.get("kind", "home") == kind]
+    if name:
+        for c in choices:
+            if c["name"] == name:
+                return c
+        raise CliError(f"unknown {kind} storage {name!r}; available: {', '.join(c['name'] for c in choices) or 'none in the catalog'}")
+    for c in choices:
+        if c.get("default"):
+            return c
+    return choices[0] if choices else {"name": "", "storageClass": "", "accessModes": ["ReadWriteOnce"], "kind": kind}
+
+
+def project_namespace(name: str) -> str:
+    return f"ws-proj-{name}"
+
+
+def parse_mount(m: str) -> tuple[str, str, str]:
+    """'shared:NAME' | 'shared:OWNER/NAME' -> (pvc, mount dir name, owner_short)."""
+    kind, _, rest = m.partition(":")
+    if kind != "shared" or not rest:
+        raise CliError(f"--mount expects shared:NAME or shared:OWNER/NAME, got {m!r}")
+    owner, _, dname = rest.rpartition("/")
+    if not NAME_RE.match(dname):
+        raise CliError(f"bad shared drive name {dname!r}")
+    if owner:
+        o = sanitize_user(owner)
+        return f"shared-{o}-{dname}", dname, o
+    return f"shared-{dname}", dname, ""
+
+
+def split_ref(ref: str) -> tuple[str | None, str]:
+    """'owner/name' -> (owner namespace, name); 'name' -> (None, name)."""
+    if "/" in ref:
+        owner, name = ref.rsplit("/", 1)
+        return tenant_namespace(sanitize_user(owner), "standard"), name
+    return None, ref
+
+
+def mesh_cfg(cat: dict) -> dict:
+    m = (cat.get("networking") or {}).get("mesh") or {}
+    return {"mode": m.get("mode") or "none", "revision": m.get("revision") or ""}
+
+
+def mesh_namespace_labels(cat: dict) -> dict:
+    """Labels that enrol a tenant namespace in the service mesh (none for mode=none)."""
+    m = mesh_cfg(cat)
+    if m["mode"] == "istio-ambient":
+        return {"istio.io/dataplane-mode": "ambient"}
+    if m["mode"] == "istio-sidecar":
+        return {"istio.io/rev": m["revision"]} if m["revision"] else {"istio-injection": "enabled"}
+    return {}
+
+
+def mesh_pod_labels(cat: dict, profile: dict) -> dict:
+    """Profiles with mesh: false (hardware/kernel) keep their pods out of the mesh."""
+    if mesh_cfg(cat)["mode"] == "none" or profile.get("mesh", True):
+        return {}
+    return {"sidecar.istio.io/inject": "false", "istio.io/dataplane-mode": "none"}
+
+
+def mcast_mode(cat: dict) -> str:
+    """multus (second interface from a NetworkAttachmentDefinition) or cilium (eBPF datapath on eth0)."""
+    return (cat.get("networking", {}).get("multicast", {}).get("mode") or "multus").lower()
+
+
+def mcast_iface(cat: dict) -> str:
+    mc = cat.get("networking", {}).get("multicast", {})
+    return "eth0" if mcast_mode(cat) == "cilium" else (mc.get("iface") or "net1")
+
+
+def artifact_specs(cat: dict, tools: list[str]) -> list[dict]:
+    """Catalog tools with an `artifact` block → JSON specs for /opt/workspace/bin/install-artifact.
+    {arch}/{goarch} are left for the pod to fill in; {version} is resolved here."""
+    af = cat.get("artifactory") or {}
+    base, repos = (af.get("url") or "").rstrip("/"), af.get("repos") or {}
+    out = []
+    for t in tools:
+        a = (cat["tools"].get(t) or {}).get("artifact")
+        if not a:
+            continue
+        repo = repos.get(a.get("repo", "generic"), a.get("repo", "generic"))
+        path = a["path"].replace("{version}", str(a.get("version", "")))
+        # A repo value that is itself a URL is used verbatim (a mirror elsewhere, or the
+        # public site in a demo without Artifactory); otherwise it is a repo under `url`.
+        repo_base = repo.rstrip("/") if "://" in repo else "/".join(x for x in (base, repo) if x)
+        url = a["url"] if a.get("url") else f"{repo_base}/{path}"
+        spec = {"name": t, "url": url, "install": a.get("install", "tar"), "bin": a.get("bin", [t])}
+        for k in ("strip", "sha256"):
+            if a.get(k) is not None:
+                spec[k] = a[k]
+        out.append(spec)
+    return out
+
+
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def sh(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, text=True, capture_output=True, check=True, **kw)
+
+
+# ----------------------------------------------------------------- yaml (dry-run)
+_PLAIN = re.compile(r"[A-Za-z0-9_./][A-Za-z0-9_./+=@-]*")
+_RESERVED = {"true", "false", "null", "yes", "no", "on", "off", "~", "y", "n"}
+_NUMBER = re.compile(r"[-+]?(\d[\d_]*\.?\d*|\.\d+)([eE][-+]?\d+)?|0x[0-9a-fA-F]+|0o[0-7]+")
+
+
+def _scalar(v) -> str:
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = str(v)
+    if s and _PLAIN.fullmatch(s) and s.lower() not in _RESERVED and not _NUMBER.fullmatch(s) and ":" not in s:
+        return s
+    return json.dumps(s)
+
+
+def to_yaml(obj, indent: int = 0) -> list[str]:
+    """Minimal YAML emitter for JSON-like data (dry-run output only)."""
+    pad = " " * indent
+    out: list[str] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            key = _scalar(str(k))
+            if isinstance(v, dict) and v:
+                out.append(f"{pad}{key}:")
+                out += to_yaml(v, indent + 2)
+            elif isinstance(v, list) and v:
+                out.append(f"{pad}{key}:")
+                out += to_yaml(v, indent)
+            elif isinstance(v, str) and "\n" in v:
+                body = v.rstrip("\n")
+                out.append(f"{pad}{key}: |" + ("" if v.endswith("\n") else "-"))
+                out += [f"{pad}  {line}" for line in body.split("\n")]
+            elif isinstance(v, dict):
+                out.append(f"{pad}{key}: {{}}")
+            elif isinstance(v, list):
+                out.append(f"{pad}{key}: []")
+            else:
+                out.append(f"{pad}{key}: {_scalar(v)}")
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, dict) and item:
+                sub = to_yaml(item, indent + 2)
+                out.append(f"{pad}- {sub[0][indent + 2:]}")
+                out += sub[1:]
+            elif isinstance(item, (dict, list)):
+                out.append(f"{pad}- {json.dumps(item)}")
+            else:
+                out.append(f"{pad}- {_scalar(item)}")
+    else:
+        out.append(f"{pad}{_scalar(obj)}")
+    return out
+
+
+def dump_objects(objs: list[dict]) -> str:
+    return "\n".join("---\n" + "\n".join(to_yaml(o)) for o in objs) + "\n"
+
+
+# ------------------------------------------------------------------------ kubectl
+class Kube:
+    def __init__(self, context: str | None = None, namespace: str | None = None, offline: bool = False):
+        self.offline = offline  # --offline: render manifests without touching a cluster (GitOps, CI, no kubectl)
+        if not offline and not shutil.which("kubectl"):
+            raise CliError("kubectl not found in PATH")
+        self.context = context
+        self.namespace = namespace
+
+    def cmd(self, args: list[str], ns=None) -> list[str]:
+        c = ["kubectl"]
+        if self.context:
+            c += ["--context", self.context]
+        if ns is None:
+            ns = self.namespace
+        if ns is not NO_NS and ns:
+            c += ["-n", ns]
+        return c + list(args)
+
+    def run(self, args: list[str], ns=None, input: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
+        if self.offline:
+            raise CliError(f"--offline: refusing to run kubectl {' '.join(args)}")
+        res = subprocess.run(self.cmd(args, ns), input=input, text=True, capture_output=True)
+        if check and res.returncode != 0:
+            raise CliError(f"kubectl {' '.join(args)}: {(res.stderr or res.stdout).strip()}")
+        return res
+
+    def get(self, kind: str, name: str | None = None, ns=None, selector: str | None = None,
+            extra: list[str] | None = None):
+        if self.offline:
+            return None
+        args = ["get", kind] + ([name] if name else []) + (["-l", selector] if selector else []) + (extra or [])
+        res = self.run(args + ["-o", "json"], ns=ns, check=False)
+        if res.returncode != 0:
+            if "not found" in res.stderr or "NotFound" in res.stderr:
+                return None
+            raise CliError(f"kubectl get {kind} {name or ''}: {res.stderr.strip()}")
+        return json.loads(res.stdout)
+
+    def apply(self, objects: list[dict]) -> str:
+        doc = json.dumps({"apiVersion": "v1", "kind": "List", "items": objects})
+        return self.run(["apply", "-f", "-"], ns=NO_NS, input=doc).stdout
+
+    def whoami(self) -> str | None:
+        if self.offline:
+            return None
+        res = self.run(["auth", "whoami", "-o", "json"], ns=NO_NS, check=False)
+        if res.returncode != 0:
+            return None
+        return json.loads(res.stdout).get("status", {}).get("userInfo", {}).get("username")
+
+
+CATALOG_FILE: str | None = None  # --catalog FILE: render from a local catalog (GitOps, CI, --offline)
+
+
+def load_catalog(k: Kube) -> dict:
+    if CATALOG_FILE:
+        try:
+            return {**DEFAULT_CATALOG, **json.loads(Path(CATALOG_FILE).read_text())}
+        except (OSError, json.JSONDecodeError) as e:
+            raise CliError(f"cannot read --catalog {CATALOG_FILE}: {e}")
+    cm = k.get("configmap", CATALOG_CM, ns=SYSTEM_NS)
+    data = (cm or {}).get("data", {}).get("catalog.json")
+    if data:
+        try:
+            cat = json.loads(data)
+            return {**DEFAULT_CATALOG, **cat}
+        except json.JSONDecodeError as e:
+            warn(f"cluster catalog is not valid JSON ({e}); using built-in defaults")
+    else:
+        warn(f"cannot read configmap {SYSTEM_NS}/{CATALOG_CM}; using built-in catalog")
+    return DEFAULT_CATALOG
+
+
+def resolve_namespace(args, k: Kube, tier: str = "standard") -> str:
+    if getattr(args, "namespace", None):
+        return args.namespace
+    if getattr(args, "project", None):
+        return project_namespace(args.project)
+    if os.environ.get("WORKSPACE_NAMESPACE"):
+        return os.environ["WORKSPACE_NAMESPACE"]
+    user = load_config().get("user")
+    if not user:
+        who = k.whoami()
+        if not who:
+            raise CliError("cannot determine your username (needs kubectl >= 1.28): pass --namespace, "
+                           "set WORKSPACE_NAMESPACE, or put {\"user\": \"alice\"} in " + str(CONFIG_FILE))
+        user = sanitize_user(who)
+    return tenant_namespace(user, tier)
+
+
+# --------------------------------------------------------------------------- keys
+def ensure_client_key(ns: str, name: str) -> tuple[Path, str]:
+    KEYS_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(CONFIG_DIR, 0o700)
+    os.chmod(KEYS_DIR, 0o700)
+    key = KEYS_DIR / f"{ns}--{name}"
+    if not key.exists():
+        if not shutil.which("ssh-keygen"):
+            raise CliError("ssh-keygen not found (install OpenSSH client)")
+        sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"workspace:{ns}/{name}", "-f", str(key)])
+        info(f"generated SSH key {key}")
+    os.chmod(key, 0o600)
+    return key, key.with_suffix(".pub").read_text().strip()
+
+
+def generate_keypair(comment: str) -> tuple[str, str]:
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "key"
+        sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", comment, "-f", str(p)])
+        return p.read_text(), p.with_suffix(".pub").read_text().strip()
+
+
+def host_keypair(k: Kube, ns: str, obj: str, rotate: bool) -> tuple[str, str]:
+    """Stable host key per workspace: reuse the Secret if it exists so VS Code never sees a changed key."""
+    if not rotate:
+        existing = k.get("secret", f"{obj}-ssh", ns=ns)
+        data = (existing or {}).get("data", {})
+        if data.get("ssh_host_ed25519_key") and data.get("ssh_host_ed25519_key.pub"):
+            return b64d(data["ssh_host_ed25519_key"]), b64d(data["ssh_host_ed25519_key.pub"]).strip()
+    return generate_keypair(f"host:{ns}/{obj}")
+
+
+def resolve_git_auth(args, k: Kube, ns: str, obj: str) -> tuple[str, dict | None, str | None]:
+    """→ (mode, secret stringData or None if the existing Secret is kept, public key to show)."""
+    mode = args.git_auth
+    if args.git_key:
+        mode = "ssh"
+    elif args.git_token_stdin or os.environ.get("WORKSPACE_GIT_TOKEN"):
+        mode = "token"
+    if mode == "none":
+        return "none", {}, None
+    if mode == "ssh":
+        key = Path(args.git_key).expanduser()
+        if not key.exists():
+            raise CliError(f"--git-key {key} not found")
+        return "ssh", {"ssh_key": key.read_text()}, None
+    if mode == "token":
+        token = sys.stdin.read().strip() if args.git_token_stdin else os.environ.get("WORKSPACE_GIT_TOKEN", "")
+        if not token:
+            raise CliError("no token: pipe it via --git-token-stdin or set WORKSPACE_GIT_TOKEN")
+        return "token", {"token": token, "username": args.git_token_user}, None
+    # mode == "deploy-key": a key that only this workspace holds; add it to the repo / your git account.
+    existing = k.get("secret", f"{obj}-git", ns=ns) if not args.rotate_git_key else None
+    data = (existing or {}).get("data", {})
+    if data.get("ssh_key.pub"):
+        return "ssh", None, b64d(data["ssh_key.pub"]).strip()
+    priv, pub = generate_keypair(f"workspace:{ns}/{obj}")
+    return "ssh", {"ssh_key": priv, "ssh_key.pub": pub}, pub
+
+
+# -------------------------------------------------------------- ssh client config
+def ssh_alias(name: str) -> str:
+    return f"ws-{name}"
+
+
+def replace_block(path: Path, start: str, end: str, block: str | None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = path.read_text() if path.exists() else ""
+    pattern = re.compile(rf"(?ms)^{re.escape(start)}.*?^{re.escape(end)}\n?")
+    text = pattern.sub("", text)
+    if block:
+        text = (text.rstrip("\n") + "\n\n" if text.strip() else "") + block
+    path.write_text(text)
+    os.chmod(path, 0o600)
+
+
+def write_ssh_config(ns: str, name: str, key_path: Path, context: str | None, forward_agent: bool,
+                     alias: str | None = None) -> str:
+    alias = alias or ssh_alias(name)
+    script = shutil.which("workspace") or os.path.abspath(sys.argv[0])
+    proxy = [sys.executable, script, "--namespace", ns] + (["--context", context] if context else []) + ["proxy", name]
+    start, end = f"# >>> workspace {ns}/{name} >>>", f"# <<< workspace {ns}/{name} <<<"
+    block = "\n".join([
+        start + "  (managed by `workspace`; edits here are overwritten)",
+        f"Host {alias}",
+        f"    User {DEV_USER}",
+        f"    HostName {alias}",
+        f"    HostKeyAlias {alias}",
+        f"    ProxyCommand {' '.join(shlex.quote(p) for p in proxy)}",
+        f"    IdentityFile {key_path}",
+        "    IdentitiesOnly yes",
+        f"    UserKnownHostsFile {KNOWN_HOSTS}",
+        "    StrictHostKeyChecking yes",
+        "    ConnectTimeout 240",
+        "    ServerAliveInterval 30",
+        "    ServerAliveCountMax 4",
+        f"    ForwardAgent {'yes' if forward_agent else 'no'}",
+        end,
+        "",
+    ])
+    replace_block(SSH_CONFIG, start, end, block)
+    return alias
+
+
+def remove_ssh_config(ns: str, name: str) -> None:
+    if SSH_CONFIG.exists():
+        replace_block(SSH_CONFIG, f"# >>> workspace {ns}/{name} >>>", f"# <<< workspace {ns}/{name} <<<", None)
+
+
+def write_known_host(alias: str, hostkey_pub: str | None) -> None:
+    KNOWN_HOSTS.parent.mkdir(parents=True, exist_ok=True)
+    lines = [l for l in (KNOWN_HOSTS.read_text().splitlines() if KNOWN_HOSTS.exists() else [])
+             if not l.startswith(alias + " ")]
+    if hostkey_pub:
+        parts = hostkey_pub.split()
+        lines.append(f"{alias} {parts[0]} {parts[1]}")
+    KNOWN_HOSTS.write_text("\n".join(lines) + ("\n" if lines else ""))
+    os.chmod(KNOWN_HOSTS, 0o600)
+
+
+# ------------------------------------------------------------------- rendering
+def render_workspace(ns: str, name: str, spec: dict, cat: dict, profile: dict,
+                     client_pub: str, hostkey: tuple[str, str], git_secret: dict | None) -> list[dict]:
+    obj = ssh_alias(name)  # k8s object name: ws-<name>; pod: ws-<name>-0
+    tier = profile.get("tier", "standard")
+    labels = {LABEL_WS: name, LABEL_LANG: spec["lang"], LABEL_PROFILE: spec["profile"],
+              LABEL_TIER: tier, LABEL_MANAGED: "workspace-cli"}
+    sel = {LABEL_WS: name}
+    objs: list[dict] = []
+
+    drive = spec.get("drive") or f"{obj}-home"
+    pvc = {"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+           "metadata": {"name": drive, "namespace": ns, "labels": {**labels, LABEL_DRIVE: "home"},
+                        "annotations": {ANN_LAST_WS: name, ANN_LANGS: ",".join(spec.get("languages") or [spec["lang"]]),
+                                        ANN_STORAGE: spec.get("storage") or ""}},
+           "spec": {"accessModes": ["ReadWriteOnce"],
+                    "resources": {"requests": {"storage": spec["size"]}}}}
+    if spec.get("storageClass"):
+        pvc["spec"]["storageClassName"] = spec["storageClass"]
+    if spec.get("fromSnapshot"):  # a NEW drive filled from a VolumeSnapshot (CSI)
+        pvc["spec"]["dataSource"] = {"apiGroup": "snapshot.storage.k8s.io", "kind": "VolumeSnapshot", "name": spec["fromSnapshot"]}
+    objs.append(pvc)
+
+    objs.append({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                 "metadata": {"name": f"{obj}-ssh", "namespace": ns, "labels": labels},
+                 "stringData": {"authorized_keys": client_pub + "\n",
+                                "ssh_host_ed25519_key": hostkey[0],
+                                "ssh_host_ed25519_key.pub": hostkey[1] + "\n"}})
+    if git_secret:
+        objs.append({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                     "metadata": {"name": f"{obj}-git", "namespace": ns, "labels": labels},
+                     "stringData": git_secret})
+
+    objs.append({"apiVersion": "v1", "kind": "Service",
+                 "metadata": {"name": obj, "namespace": ns, "labels": labels},
+                 "spec": {"clusterIP": "None", "selector": sel,
+                          "ports": [{"name": "ssh", "port": SSH_PORT, "targetPort": "ssh"}]}})
+
+    af = cat.get("artifactory") or {}
+    artifacts = artifact_specs(cat, spec["tools"])
+    # The pod fills in the architecture placeholders itself; keep them literal here.
+    env = [
+        {"name": "WORKSPACE_NAME", "value": name},
+        {"name": "WORKSPACE_NAMESPACE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}},
+        {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
+        {"name": "WORKSPACE_LANG", "value": spec["lang"]},
+        {"name": "WORKSPACE_LANGUAGES", "value": ",".join(spec.get("languages") or [spec["lang"]])},
+        {"name": "WORKSPACE_TOOLS", "value": ",".join(spec["tools"])},
+        {"name": "WORKSPACE_ARTIFACTS", "value": json.dumps(artifacts, separators=(",", ":"), sort_keys=True)},
+        {"name": "WORKSPACE_PROFILE", "value": spec["profile"]},
+        {"name": "WORKSPACE_REPO", "value": spec.get("repo") or ""},
+        {"name": "WORKSPACE_REPO_DIR", "value": repo_dirname(spec["repo"]) if spec.get("repo") else ""},
+        {"name": "WORKSPACE_BRANCH", "value": spec.get("branch") or ""},
+        {"name": "WORKSPACE_DOTFILES", "value": spec.get("dotfiles") or ""},
+        {"name": "GIT_AUTH_MODE", "value": spec["gitAuth"]},
+        {"name": "GIT_HOST", "value": git_host(spec.get("repo") or "")},
+        {"name": "GIT_USER_NAME", "value": spec.get("gitName") or ""},
+        {"name": "GIT_USER_EMAIL", "value": spec.get("gitEmail") or ""},
+        {"name": "WORKSPACE_SSH_LISTEN", "value": "0.0.0.0" if spec.get("expose") else "127.0.0.1"},
+        {"name": "WORKSPACE_MCAST_IFACE", "value": mcast_iface(cat) if spec.get("multicast") else ""},
+        {"name": "WORKSPACE_DNS", "value": f"{obj}.{ns}.svc.cluster.local"},
+        {"name": "WORKSPACE_MOUNTS", "value": ",".join(f"{SHARED_MOUNT_PATH}/{parse_mount(m)[1]}" for m in spec.get("mounts") or [])},
+        {"name": "TZ", "value": spec.get("tz") or "UTC"},
+    ]
+    if af.get("url"):
+        env += [
+            {"name": "ARTIFACTORY_URL", "value": af["url"].rstrip("/")},
+            {"name": "ARTIFACTORY_REPOS", "value": json.dumps(af.get("repos") or {}, separators=(",", ":"), sort_keys=True)},
+            {"name": "ARTIFACTORY_MIRRORS", "value": json.dumps(af.get("mirrors") or {}, separators=(",", ":"), sort_keys=True)},
+            # Optional per-developer token: Secret workspace-profile/artifactory_token (portal "Profile" page
+            # or `kubectl create secret generic workspace-profile --from-literal=artifactory_token=…`).
+            {"name": "ARTIFACTORY_TOKEN", "valueFrom": {"secretKeyRef": {"name": "workspace-profile", "key": "artifactory_token", "optional": True}}},
+            {"name": "ARTIFACTORY_USER", "valueFrom": {"secretKeyRef": {"name": "workspace-profile", "key": "artifactory_user", "optional": True}}},
+        ]
+
+    volumes = [
+        {"name": "home", "persistentVolumeClaim": {"claimName": drive}},
+        {"name": "ssh", "secret": {"secretName": f"{obj}-ssh", "defaultMode": 0o440}},
+        {"name": "features-extra", "configMap": {"name": "workspace-features", "optional": True, "defaultMode": 0o755}},
+    ]
+    mounts = [
+        {"name": "home", "mountPath": "/home/dev"},
+        {"name": "ssh", "mountPath": "/etc/workspace/ssh", "readOnly": True},
+        {"name": "features-extra", "mountPath": "/opt/workspace/features.d", "readOnly": True},
+    ]
+    for i, m in enumerate(spec.get("mounts") or []):  # shared drives: RWX PVCs, mine or shared with me
+        pvc_name, dname, _owner = parse_mount(m)
+        volumes.append({"name": f"shared-{i}", "persistentVolumeClaim": {"claimName": pvc_name}})
+        mounts.append({"name": f"shared-{i}", "mountPath": f"{SHARED_MOUNT_PATH}/{dname}"})
+    mounts += [
+    ]
+    if spec["gitAuth"] != "none":
+        volumes.append({"name": "git", "secret": {"secretName": f"{obj}-git", "defaultMode": 0o440}})
+        mounts.append({"name": "git", "mountPath": "/etc/workspace/git", "readOnly": True})
+
+    for p in list(profile.get("hostPaths", [])) + list(spec.get("hostPaths", [])):
+        vname = "host-" + (re.sub(r"[^a-z0-9]+", "-", p.strip("/").lower()).strip("-") or "root")
+        if any(v["name"] == vname for v in volumes):
+            continue
+        volumes.append({"name": vname, "hostPath": {"path": p}})
+        mounts.append({"name": vname, "mountPath": p, "readOnly": p in ("/lib/modules", "/usr/src", "/lib/firmware")})
+
+    resources = {"requests": {"cpu": spec["cpuRequest"], "memory": spec["memoryRequest"],
+                              "ephemeral-storage": spec["ephemeralStorage"]},
+                 "limits": {"cpu": spec["cpu"], "memory": spec["memory"],
+                            "ephemeral-storage": spec["ephemeralStorage"]}}
+    for res, qty in spec.get("devices", {}).items():  # extended resources: requests must equal limits
+        resources["requests"][res] = qty
+        resources["limits"][res] = qty
+        if res.startswith("hugepages-") and not any(v["name"] == "hugepages" for v in volumes):
+            volumes.append({"name": "hugepages", "emptyDir": {"medium": "HugePages"}})
+            mounts.append({"name": "hugepages", "mountPath": "/dev/hugepages"})
+
+    if profile.get("privileged"):
+        csc = {"privileged": True, "runAsUser": 0}
+    else:
+        caps = sorted(set(profile.get("capabilities", [])) | set(spec.get("caps", [])))
+        csc = {"runAsUser": 0, "allowPrivilegeEscalation": True,  # sudo inside needs setuid
+               "capabilities": {"drop": ["ALL"], "add": caps}}
+
+    tcp_check = ["bash", "-c", f"exec 3<>/dev/tcp/127.0.0.1/{SSH_PORT}"]  # sshd listens on loopback by default
+    container = {
+        "name": "workspace",
+        "image": spec["image"],
+        "imagePullPolicy": "IfNotPresent",
+        "env": env,
+        "ports": [{"name": "ssh", "containerPort": SSH_PORT, "protocol": "TCP"}],
+        "resources": resources,
+        "securityContext": csc,
+        "volumeMounts": mounts,
+        "readinessProbe": {"exec": {"command": tcp_check}, "initialDelaySeconds": 2, "periodSeconds": 5},
+        "livenessProbe": {"exec": {"command": tcp_check}, "initialDelaySeconds": 30, "periodSeconds": 30, "failureThreshold": 5},
+    }
+
+    pod_sc = {"fsGroup": DEV_GID, "fsGroupChangePolicy": "OnRootMismatch",
+              "seccompProfile": {"type": "RuntimeDefault"},
+              # kubelet-"safe" sysctls, allowed by PSS baseline: ping without NET_RAW, bind low ports as dev.
+              "sysctls": [{"name": "net.ipv4.ping_group_range", "value": "0 2147483647"},
+                          {"name": "net.ipv4.ip_unprivileged_port_start", "value": "0"}]}
+    if profile.get("sysctls"):  # extra namespaced sysctls; "unsafe" ones need kubelet allowedUnsafeSysctls (lab pool)
+        pod_sc["sysctls"] += list(profile["sysctls"])
+    # Multicast interface tuning (rp_filter, igmp limits) is done by the NAD's chained
+    # `tuning` plugin at CNI ADD time, so it needs no pod-level sysctls and passes PSS baseline.
+
+    pod_spec = {
+        "serviceAccountName": "workspace",
+        "automountServiceAccountToken": True,  # heartbeat patches its own pod annotation
+        "terminationGracePeriodSeconds": 30,
+        "securityContext": pod_sc,
+        "containers": [container],
+        "volumes": volumes,
+    }
+    iso = cat["isolation"].get(spec["isolation"], {})
+    if "hostUsers" in iso:
+        pod_spec["hostUsers"] = iso["hostUsers"]
+    if iso.get("runtimeClass"):
+        pod_spec["runtimeClassName"] = iso["runtimeClass"]
+    if profile.get("nodeSelector"):
+        pod_spec["nodeSelector"] = profile["nodeSelector"]
+    if profile.get("tolerations"):
+        pod_spec["tolerations"] = profile["tolerations"]
+    if profile.get("exclusiveNode"):  # one lab workspace per node, across all tenants: a crashed driver only takes you down
+        pod_spec["affinity"] = {"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [
+            {"topologyKey": "kubernetes.io/hostname", "namespaceSelector": {},
+             "labelSelector": {"matchExpressions": [{"key": LABEL_TIER, "operator": "In", "values": ["lab"]}]}}]}}
+    if cat.get("pullSecret"):
+        pod_spec["imagePullSecrets"] = [{"name": cat["pullSecret"]}]
+
+    pod_ann = {}
+    if spec.get("multicast") and mcast_mode(cat) == "multus":  # cilium mode needs no extra interface
+        pod_ann[ANN_NETWORKS] = cat["networking"]["multicast"]["nad"]
+
+    objs.append({
+        "apiVersion": "apps/v1", "kind": "StatefulSet",
+        "metadata": {"name": obj, "namespace": ns, "labels": labels,
+                     "annotations": {ANN_IDLE: spec["idleTimeout"], ANN_SPEC: json.dumps(spec, sort_keys=True)}},
+        "spec": {"serviceName": obj, "replicas": 1, "selector": {"matchLabels": sel},
+                 "updateStrategy": {"type": "RollingUpdate"},
+                 # Explicit: deleting or scaling the workspace never deletes the home drive.
+                 "persistentVolumeClaimRetentionPolicy": {"whenDeleted": "Retain", "whenScaled": "Retain"},
+                 "template": {"metadata": {"labels": {**labels, **mesh_pod_labels(cat, profile)}, **({"annotations": pod_ann} if pod_ann else {})},
+                              "spec": pod_spec}},
+    })
+
+    if spec.get("expose"):
+        objs.append({"apiVersion": "v1", "kind": "Service",
+                     "metadata": {"name": f"{obj}-public", "namespace": ns, "labels": labels},
+                     "spec": {"type": "LoadBalancer", "selector": sel,
+                              "ports": [{"name": "ssh", "port": 22, "targetPort": "ssh"}]}})
+        objs.append({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+                     "metadata": {"name": f"{obj}-allow-ssh", "namespace": ns, "labels": labels},
+                     "spec": {"podSelector": {"matchLabels": sel}, "policyTypes": ["Ingress"],
+                              "ingress": [{"ports": [{"port": SSH_PORT, "protocol": "TCP"}]}]}})
+    return objs
+
+
+def render_tenant(user: str, tier: str, cat: dict, opts: dict, api_ips: list[str], api_ports: list[int],
+                  ns: str | None = None, subjects: list[dict] | None = None,
+                  extra_labels: dict | None = None, ns_annotations: dict | None = None) -> list[dict]:
+    ns = ns or tenant_namespace(user, tier)
+    psa = "baseline" if tier == "standard" else "privileged"
+    ns_labels = {LABEL_TENANT: user, LABEL_TIER: tier, LABEL_MANAGED: "workspace-cli",
+                 "pod-security.kubernetes.io/enforce": psa,
+                 "pod-security.kubernetes.io/audit": psa,
+                 "pod-security.kubernetes.io/warn": psa, **(extra_labels or {})}
+    ns_labels.update(mesh_namespace_labels(cat))   # Istio ambient / sidecar enrolment (deploy/platform/mesh/)
+    subjects = subjects or [{"kind": opts["subject_kind"], "name": opts["subject"], "apiGroup": "rbac.authorization.k8s.io"}]
+    meta = lambda n: {"name": n, "namespace": ns, "labels": {LABEL_MANAGED: "workspace-cli"}}  # noqa: E731
+    net = cat["networking"]
+    egress = [
+        {"to": [{"podSelector": {}}]},                                   # your own workspaces
+        {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}],
+         "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
+    ]
+    if api_ips:
+        egress.append({"to": [{"ipBlock": {"cidr": f"{ip}/32"}} for ip in api_ips],
+                       "ports": [{"protocol": "TCP", "port": p} for p in api_ports]})
+    egress.append({"to": [{"ipBlock": {"cidr": "0.0.0.0/0",
+                                       "except": list(net.get("clusterCIDRs", [])) + list(net.get("blockedEgress", []))}}]})
+    objs = [
+        {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": ns, "labels": ns_labels,
+                                                              **({"annotations": ns_annotations} if ns_annotations else {})}},
+        {"apiVersion": "v1", "kind": "ResourceQuota", "metadata": meta("workspace-quota"),
+         "spec": {"hard": {"requests.cpu": opts["cpu"], "requests.memory": opts["memory"], "limits.memory": opts["memory"],
+                           "requests.storage": opts["storage"], "persistentvolumeclaims": "20",
+                           "pods": "20", "count/statefulsets.apps": "20"}}},
+        {"apiVersion": "v1", "kind": "LimitRange", "metadata": meta("workspace-defaults"),
+         "spec": {"limits": [{"type": "Container",
+                              "default": {"cpu": "2", "memory": "4Gi", "ephemeral-storage": "10Gi"},
+                              "defaultRequest": {"cpu": "250m", "memory": "512Mi", "ephemeral-storage": "1Gi"}}]}},
+        {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": meta("workspace"), "automountServiceAccountToken": False},
+        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": meta("workspace-heartbeat"),
+         "rules": [{"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "patch"]}]},
+        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": meta("workspace-heartbeat"),
+         "subjects": [{"kind": "ServiceAccount", "name": "workspace", "namespace": ns}],
+         "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "workspace-heartbeat"}},
+        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": meta("workspace-developer"),
+         "subjects": subjects,
+         "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "workspace-developer"}},
+        {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta("tenant-ingress"),
+         "spec": {"podSelector": {}, "policyTypes": ["Ingress"],
+                  "ingress": [{"from": [{"podSelector": {}}]}]}},               # same namespace only
+        {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta("tenant-egress"),
+         "spec": {"podSelector": {}, "policyTypes": ["Egress"], "egress": egress}},
+    ]
+    return objs
+
+
+# ------------------------------------------------------------------ lifecycle
+def get_workspace(k: Kube, ns: str, name: str) -> dict:
+    sts = k.get("statefulset", ssh_alias(name), ns=ns)
+    if not sts:
+        raise CliError(f"workspace '{name}' not found in namespace {ns} (try: workspace list)")
+    return sts
+
+
+def wait_ready(k: Kube, ns: str, name: str, timeout: int) -> dict:
+    pod = f"{ssh_alias(name)}-0"
+    deadline, last = time.time() + timeout, ""
+    while time.time() < deadline:
+        p = k.get("pod", pod, ns=ns)
+        if p:
+            st = p.get("status", {})
+            conds = {c["type"]: c["status"] for c in st.get("conditions", [])}
+            if st.get("phase") == "Running" and conds.get("Ready") == "True":
+                return p
+            detail = ""
+            for cs in st.get("containerStatuses", []) + st.get("initContainerStatuses", []):
+                w = cs.get("state", {}).get("waiting")
+                if w:
+                    detail = f"{w.get('reason', '')} {w.get('message', '')}".strip()
+            if not detail and conds.get("PodScheduled") == "False":
+                detail = next((c.get("message", "") for c in st.get("conditions", []) if c["type"] == "PodScheduled"), "")
+            msg = f"{st.get('phase', '?')} {detail}".strip()
+        else:
+            msg = "waiting for pod"
+        if msg != last:
+            info(f"{pod}: {msg}")
+            last = msg
+        time.sleep(2)
+    raise CliError(f"timed out after {timeout}s waiting for {pod}; try: workspace status {name}")
+
+
+def ensure_running(k: Kube, ns: str, name: str, timeout: int) -> dict:
+    obj = ssh_alias(name)
+    pod = k.get("pod", f"{obj}-0", ns=ns)
+    if pod and pod["status"].get("phase") == "Running" and \
+            any(c["type"] == "Ready" and c["status"] == "True" for c in pod["status"].get("conditions", [])):
+        return pod
+    sts = get_workspace(k, ns, name)
+    if (sts["spec"].get("replicas") or 0) == 0:
+        info(f"starting {name} (cold start, usually under a minute)")
+        k.run(["scale", "statefulset", obj, "--replicas=1"], ns=ns)
+    return wait_ready(k, ns, name, timeout)
+
+
+def apiserver_endpoints(k: Kube) -> tuple[list[str], list[int]]:
+    ips: set[str] = set()
+    ports: set[int] = set()
+    slices = k.get("endpointslices", ns="default", selector="kubernetes.io/service-name=kubernetes")
+    for s in (slices or {}).get("items", []):
+        for e in s.get("endpoints", []):
+            ips.update(e.get("addresses", []))
+        for p in s.get("ports", []):
+            if p.get("port"):
+                ports.add(int(p["port"]))
+    if not ips:
+        ep = k.get("endpoints", "kubernetes", ns="default")
+        for ss in (ep or {}).get("subsets", []):
+            ips.update(a["ip"] for a in ss.get("addresses", []))
+            ports.update(int(p["port"]) for p in ss.get("ports", []))
+    return sorted(ips), sorted(ports) or [6443]
+
+
+# ------------------------------------------------------------------- commands
+def cmd_create(args, k: Kube) -> int:
+    cat = load_catalog(k)
+    d = cat["defaults"]
+    profile_name = args.profile or d["profile"]
+    profile = cat["profiles"].get(profile_name)
+    if not profile:
+        raise CliError(f"unknown profile {profile_name!r}; available: {', '.join(cat['profiles'])}")
+    # --lang go,python: the first language picks the image, the rest are installed as features
+    # (or a baked combined image like workspace-go-python is used when --image names one).
+    languages = [l.strip() for l in args.lang.split(",") if l.strip()]
+    unknown_langs = [l for l in languages if l not in cat["languages"]]
+    if not languages or unknown_langs:
+        raise CliError(f"unknown language(s) {', '.join(unknown_langs) or args.lang!r}; available: {', '.join(cat['languages'])}")
+    primary = languages[0]
+    tools = [t.strip() for t in (args.tools or "").split(",") if t.strip()]
+    for extra in languages[1:]:
+        if extra != "base" and extra not in tools:
+            tools.append(extra)
+    unknown = [t for t in tools if t not in cat["tools"]]
+    if unknown and not args.allow_unknown_tools:
+        raise CliError(f"unknown tool(s) {', '.join(unknown)}; available: {', '.join(cat['tools'])} "
+                       "(use --allow-unknown-tools if your image provides them)")
+    name = args.name or primary
+    if not NAME_RE.match(name):
+        raise CliError(f"name {name!r} must be lowercase alphanumeric/dashes, max 40 chars")
+
+    ns = resolve_namespace(args, k, profile.get("tier", "standard"))
+    k.namespace = ns
+    if not args.dry_run and not k.get("namespace", ns, ns=NO_NS):
+        raise CliError(f"namespace {ns} does not exist — ask a platform admin to run: "
+                       f"workspace admin onboard <you>{' --lab' if profile.get('tier') == 'lab' else ''}")
+    obj = ssh_alias(name)
+    existing = None if args.dry_run else k.get("statefulset", obj, ns=ns)
+    if existing and (existing["spec"].get("replicas") or 0) > 0 and not args.yes:
+        ans = input(f"workspace '{name}' exists and is running; re-applying restarts it. Continue? [y/N] ")
+        if ans.strip().lower() not in ("y", "yes"):
+            return 1
+
+    devices = {}
+    for item in args.device or []:
+        if "=" not in item:
+            raise CliError(f"--device expects resource=quantity, got {item!r}")
+        res, qty = item.split("=", 1)
+        devices[res.strip()] = qty.strip()
+    isolation = args.isolation or profile.get("isolation") or d["isolation"]
+    if isolation not in cat["isolation"]:
+        raise CliError(f"unknown isolation {isolation!r}; available: {', '.join(cat['isolation'])}")
+    if profile.get("tier") != "lab" and (devices or args.host_path or args.cap):
+        warn("devices, host paths and extra capabilities need a lab profile (--profile hardware|kernel); "
+             "the baseline Pod Security policy will reject them in a standard namespace")
+
+    choice = storage_choice(cat, args.storage, "home")
+    storage_class = args.storage_class or choice.get("storageClass") or d.get("storageClass", "")
+    mounts_ = list(args.mount or [])
+    for m in mounts_:
+        parse_mount(m)  # validate early
+    drive = args.from_drive or f"{obj}-home"
+    if args.from_drive and args.from_snapshot:
+        raise CliError("--from-drive and --from-snapshot are mutually exclusive")
+    if args.from_drive and not args.dry_run:
+        old = k.get("persistentvolumeclaim", args.from_drive, ns=ns)
+        if not old:
+            raise CliError(f"drive {args.from_drive} not found in {ns} (workspace drives list)")
+        if old["metadata"].get("labels", {}).get(LABEL_DRIVE) != "home":
+            raise CliError(f"{args.from_drive} is not a home drive")
+        users = [x["metadata"]["labels"].get(LABEL_WS) for x in (k.get("statefulsets", ns=ns, selector=LABEL_WS) or {}).get("items", [])
+                 if any(v.get("persistentVolumeClaim", {}).get("claimName") == args.from_drive
+                        for v in x["spec"]["template"]["spec"].get("volumes", []))]
+        if users and users != [name]:
+            raise CliError(f"drive {args.from_drive} is attached to workspace {users[0]}; delete that workspace first (the drive stays)")
+    spec = {
+        "lang": primary, "languages": languages, "tools": tools, "profile": profile_name, "isolation": isolation,
+        "image": args.image or f"{cat['registry']}/{cat['languages'][primary]['image']}:{args.tag or cat['tag']}",
+        "repo": args.repo or "", "branch": args.branch or "", "dotfiles": args.dotfiles or "",
+        "gitName": args.git_name or "", "gitEmail": args.git_email or "",
+        "size": args.size or d["size"], "storageClass": storage_class, "storage": choice.get("name", ""),
+        "drive": drive, "fromSnapshot": args.from_snapshot or "", "mounts": mounts_,
+        "cpu": args.cpu or d["cpu"], "memory": args.memory or d["memory"],
+        "cpuRequest": args.cpu_request or d["cpuRequest"], "memoryRequest": args.memory_request or d["memoryRequest"],
+        "ephemeralStorage": d.get("ephemeralStorage", "20Gi"),
+        "multicast": bool(args.multicast), "devices": devices, "hostPaths": args.host_path or [],
+        "caps": args.cap or [], "expose": bool(args.expose), "tz": args.tz or "",
+        "idleTimeout": args.idle_timeout or d["idleTimeout"],
+        "createdAt": utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    parse_duration(spec["idleTimeout"])  # validate
+
+    client_key, client_pub = ensure_client_key(ns, name)
+    hostkey = host_keypair(k, ns, obj, args.rotate_host_key) if not args.dry_run else generate_keypair("dry-run")
+    git_mode, git_secret, deploy_pub = resolve_git_auth(args, k, ns, obj)
+    spec["gitAuth"] = git_mode
+    objs = render_workspace(ns, name, spec, cat, profile, client_pub, hostkey, git_secret)
+
+    if args.dry_run:
+        sys.stdout.write(dump_objects(objs))
+        return 0
+
+    if k.get("persistentvolumeclaim", drive, ns=ns):
+        info(f"keeping the existing home drive {drive} (grow it with: workspace drives resize {name} SIZE)")
+        objs = [o for o in objs if o["kind"] != "PersistentVolumeClaim"]
+        k.run(["annotate", "persistentvolumeclaim", drive, f"{ANN_LAST_WS}={name}", f"{ANN_LANGS}={','.join(languages)}",
+               "--overwrite"], ns=ns, check=False)
+    for m in mounts_:
+        pvc_name, dname, owner = parse_mount(m)
+        if not k.get("persistentvolumeclaim", pvc_name, ns=ns):
+            hint = (f"ask {owner} to share it with you (workspace share drive {dname} <you>)" if owner
+                    else f"create it: workspace drives create-shared {dname}")
+            raise CliError(f"shared drive {pvc_name} not found in {ns} — {hint}")
+    for line in k.apply(objs).strip().splitlines():
+        info(line)
+
+    alias = write_ssh_config(ns, name, client_key, k.context, args.git_agent)
+    write_known_host(alias, hostkey[1])
+    if not args.no_wait:
+        wait_ready(k, ns, name, args.timeout)
+    print(f"\nworkspace '{name}' is {'ready' if not args.no_wait else 'starting'} in namespace {ns}\n")
+    print(f"  ssh         ssh {alias}            (or: workspace ssh {name})")
+    print(f"  VS Code     code --remote ssh-remote+{alias} /workspace   (or Remote-SSH: Connect to Host → {alias})")
+    print(f"  stop/start  workspace stop {name} · workspace start {name}   (auto-stops after {spec['idleTimeout']} idle)")
+    print(f"  home drive  {drive} ({spec['size']}{', ' + choice['name'] if choice.get('name') else ''}) — survives stop/delete; "
+          f"`workspace drives list`")
+    print(f"  network     {obj}.{ns}.svc.cluster.local  (your other workspaces in {ns} can reach it on any port)")
+    for m in mounts_:
+        print(f"  mounted     {m} at {SHARED_MOUNT_PATH}/{parse_mount(m)[1]}")
+    if deploy_pub:
+        host = git_host(spec["repo"]) or "your git host"
+        print(f"\n  git: this workspace has its own deploy key. Add it to {host} (repo deploy key with write access,")
+        print(f"       or your account's SSH keys) so the workspace can clone on boot and push:\n\n    {deploy_pub}\n")
+    return 0
+
+
+def cmd_list(args, k: Kube) -> int:
+    extra = ["-A"] if args.all_namespaces else []
+    ns = NO_NS if args.all_namespaces else resolve_namespace(args, k)
+    sts = (k.get("statefulsets", ns=ns, selector=LABEL_WS, extra=extra) or {}).get("items", [])
+    pods = {(p["metadata"]["namespace"], p["metadata"]["name"]): p
+            for p in (k.get("pods", ns=ns, selector=LABEL_WS, extra=extra) or {}).get("items", [])}
+    rows = [("NAMESPACE", "NAME", "LANG", "PROFILE", "STATUS", "IDLE-TIMEOUT", "LAST-ACTIVE", "NODE")]
+    now = utcnow()
+    for s in sorted(sts, key=lambda s: (s["metadata"]["namespace"], s["metadata"]["name"])):
+        m = s["metadata"]
+        pod = pods.get((m["namespace"], f"{m['name']}-0"))
+        if (s["spec"].get("replicas") or 0) == 0:
+            status = "Stopped"
+        elif s.get("status", {}).get("readyReplicas"):
+            status = "Running"
+        else:
+            status = (pod or {}).get("status", {}).get("phase", "Starting")
+        last = (pod or {}).get("metadata", {}).get("annotations", {}).get(ANN_ACTIVE)
+        last_s = human_duration((now - parse_ts(last)).total_seconds()) + " ago" if last else "-"
+        rows.append((m["namespace"], m["labels"].get(LABEL_WS, m["name"]), m["labels"].get(LABEL_LANG, "-"),
+                     m["labels"].get(LABEL_PROFILE, "-"), status, m.get("annotations", {}).get(ANN_IDLE, "-"),
+                     last_s, (pod or {}).get("spec", {}).get("nodeName") or "-"))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+    if len(rows) == 1:
+        info("no workspaces yet: workspace create --lang dev")
+    return 0
+
+
+def cmd_status(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    sts = get_workspace(k, ns, args.name)
+    obj = ssh_alias(args.name)
+    spec = json.loads(sts["metadata"].get("annotations", {}).get(ANN_SPEC, "{}"))
+    pod = k.get("pod", f"{obj}-0", ns=ns)
+    pvc = k.get("persistentvolumeclaim", spec.get("drive") or f"{obj}-home", ns=ns)
+    print(f"workspace {args.name}  (namespace {ns})")
+    print(f"  image       {spec.get('image', '-')}")
+    print(f"  languages   {', '.join(spec.get('languages') or [spec.get('lang', '-')])}")
+    print(f"  tools       {', '.join(spec.get('tools', [])) or 'none'}")
+    print(f"  profile     {spec.get('profile', '-')}  isolation={spec.get('isolation', '-')}  multicast={spec.get('multicast', False)}")
+    print(f"  resources   cpu {spec.get('cpuRequest')}→{spec.get('cpu')}  mem {spec.get('memoryRequest')}→{spec.get('memory')}"
+          + (f"  devices {spec.get('devices')}" if spec.get('devices') else ""))
+    print(f"  home drive  {spec.get('drive') or obj + '-home'}  {(pvc or {}).get('status', {}).get('capacity', {}).get('storage', spec.get('size'))}  "
+          f"({(pvc or {}).get('status', {}).get('phase', 'missing')}; storage={spec.get('storage') or spec.get('storageClass') or 'default'})")
+    for m in spec.get("mounts") or []:
+        print(f"  shared      {m} at {SHARED_MOUNT_PATH}/{parse_mount(m)[1]}")
+    print(f"  dns         {obj}.{ns}.svc.cluster.local   (workspace net {args.name} for peers and links)")
+    print(f"  repo        {spec.get('repo') or '-'}  branch={spec.get('branch') or 'default'}  auth={spec.get('gitAuth')}")
+    print(f"  idle        stops after {sts['metadata'].get('annotations', {}).get(ANN_IDLE, '?')} without ssh/editor activity")
+    if (sts["spec"].get("replicas") or 0) == 0:
+        print("  state       Stopped (workspace start %s, or just ssh in)" % args.name)
+    elif pod:
+        st = pod["status"]
+        ready = any(c["type"] == "Ready" and c["status"] == "True" for c in st.get("conditions", []))
+        last = pod["metadata"].get("annotations", {}).get(ANN_ACTIVE)
+        print(f"  state       {st.get('phase')}{' (ready)' if ready else ''}  node={pod['spec'].get('nodeName', '-')}  "
+              f"started={st.get('startTime', '-')}  last-active={last or '-'}")
+        for cs in st.get("containerStatuses", []):
+            w = cs.get("state", {}).get("waiting")
+            if w:
+                print(f"  waiting     {w.get('reason')}: {w.get('message', '')}")
+    print(f"  connect     ssh {obj}   |   code --remote ssh-remote+{obj} /workspace")
+    if spec.get("expose"):
+        svc = k.get("service", f"{obj}-public", ns=ns) or {}
+        ing = (svc.get("status", {}).get("loadBalancer", {}).get("ingress") or [{}])[0]
+        addr = ing.get("ip") or ing.get("hostname") or "<pending>"
+        print(f"  public ssh  ssh -p 22 dev@{addr}   (LoadBalancer {obj}-public; key auth only)")
+    return 0
+
+
+def cmd_start(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    ensure_running(k, ns, args.name, args.timeout)
+    info(f"{args.name} is running")
+    return 0
+
+
+def cmd_stop(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    get_workspace(k, ns, args.name)
+    k.run(["scale", "statefulset", ssh_alias(args.name), "--replicas=0"], ns=ns)
+    info(f"{args.name} stopped; the home volume is kept. `workspace start {args.name}` or ssh to resume")
+    return 0
+
+
+def cmd_delete(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    obj = ssh_alias(args.name)
+    get_workspace(k, ns, args.name)
+    if not args.yes:
+        what = "the workspace AND its home drive (all code not pushed is lost)" if args.purge else "the workspace (home drive kept)"
+        if input(f"Delete {what} for '{args.name}' in {ns}? [y/N] ").strip().lower() not in ("y", "yes"):
+            return 1
+    sts = get_workspace(k, ns, args.name)
+    drive = json.loads(sts["metadata"].get("annotations", {}).get(ANN_SPEC, "{}")).get("drive") or f"{obj}-home"
+    k.run(["delete", "statefulset,service,secret,networkpolicy,role,rolebinding", "-l", f"{LABEL_WS}={args.name}", "--ignore-not-found"], ns=ns)
+    if args.purge:
+        # the admission policy refuses to delete a home drive without this mark
+        k.run(["annotate", "persistentvolumeclaim", drive, f"{ANN_ALLOW_DELETE}=true", "--overwrite"], ns=ns, check=False)
+        k.run(["delete", "persistentvolumeclaim", drive, "--ignore-not-found"], ns=ns)
+        for p in (KEYS_DIR / f"{ns}--{args.name}", KEYS_DIR / f"{ns}--{args.name}.pub"):
+            p.unlink(missing_ok=True)
+    remove_ssh_config(ns, args.name)
+    write_known_host(obj, None)
+    info(f"deleted {args.name}" + ("" if args.purge else
+         f" (home drive {drive} kept — `workspace drives list`; re-use it with `create --from-drive {drive}`; `delete --purge` removes it)"))
+    return 0
+
+
+def cmd_ssh(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    get_workspace(k, ns, args.name)
+    if not shutil.which("ssh"):
+        raise CliError("ssh client not found")
+    alias = getattr(args, "alias", None) or ssh_alias(args.name)
+    if getattr(args, "alias", None) and f"Host {alias}\n" not in (SSH_CONFIG.read_text() if SSH_CONFIG.exists() else ""):
+        cmd_ssh_config(argparse.Namespace(namespace=ns, name=args.name, git_agent=False, alias=alias), k)  # guest: first time
+    return subprocess.call(["ssh", alias] + list(args.command))
+
+
+def cmd_code(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    get_workspace(k, ns, args.name)
+    if not shutil.which("code"):
+        raise CliError("`code` CLI not found; in VS Code run 'Shell Command: Install code command in PATH'")
+    return subprocess.call(["code", "--remote", f"ssh-remote+{getattr(args, 'alias', None) or ssh_alias(args.name)}", args.path])
+
+
+def cmd_proxy(args, k: Kube) -> int:
+    """ssh ProxyCommand: start the workspace if needed, then bridge stdio to sshd through the API server."""
+    ns = args.namespace or resolve_namespace(args, k)
+    try:
+        ensure_running(k, ns, args.name, args.timeout)
+    except CliError as e:
+        print(f"workspace: {e}", file=sys.stderr)
+        return 255
+    cmd = k.cmd(["exec", "-i", "-q", f"{ssh_alias(args.name)}-0", "-c", "workspace", "--",
+                 "socat", "-", f"TCP:127.0.0.1:{SSH_PORT}"], ns=ns)
+    if os.name == "nt":
+        return subprocess.call(cmd)
+    os.execvp(cmd[0], cmd)
+    return 0
+
+
+def cmd_port_forward(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    ensure_running(k, ns, args.name, args.timeout)
+    return subprocess.call(k.cmd(["port-forward", f"pod/{ssh_alias(args.name)}-0"] + list(args.ports), ns=ns))
+
+
+def cmd_logs(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    get_workspace(k, ns, args.name)
+    return subprocess.call(k.cmd(["logs", f"{ssh_alias(args.name)}-0", "-c", "workspace"] + (["-f"] if args.follow else []), ns=ns))
+
+
+def cmd_ssh_config(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    obj = ssh_alias(args.name)
+    get_workspace(k, ns, args.name)
+    secret = k.get("secret", f"{obj}-ssh", ns=ns)
+    if not secret:
+        raise CliError(f"secret {obj}-ssh missing; re-run workspace create")
+    key, pub = ensure_client_key(ns, args.name)
+    authorized = b64d(secret["data"].get("authorized_keys", ""))
+    if pub not in authorized:
+        secret_patch = {"stringData": {"authorized_keys": authorized.rstrip("\n") + "\n" + pub + "\n"}}
+        k.run(["patch", "secret", f"{obj}-ssh", "--type=merge", "-p", json.dumps(secret_patch)], ns=ns)
+        info("added this machine's key to the workspace (live within about a minute; sshd reads the Secret mount)")
+    alias = write_ssh_config(ns, args.name, key, k.context, args.git_agent, alias=getattr(args, "alias", None))
+    write_known_host(alias, b64d(secret["data"]["ssh_host_ed25519_key.pub"]).strip())
+    info(f"wrote {SSH_CONFIG} entry 'Host {alias}'")
+    return 0
+
+
+def cmd_idle(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    get_workspace(k, ns, args.name)
+    parse_duration(args.duration)
+    k.run(["annotate", "statefulset", ssh_alias(args.name), f"{ANN_IDLE}={args.duration}", "--overwrite"], ns=ns)
+    info(f"{args.name}: idle timeout = {args.duration}")
+    return 0
+
+
+def cmd_catalog(args, k: Kube) -> int:
+    cat = load_catalog(k)
+    if args.json:
+        print(json.dumps(cat, indent=2))
+        return 0
+    print(f"registry {cat['registry']}  tag {cat['tag']}"
+          + (f"  artifactory {cat['artifactory']['url']}" if (cat.get('artifactory') or {}).get('url') else "") + "\n")
+    print("languages (--lang a or --lang a,b)")
+    for n, v in cat["languages"].items():
+        print(f"  {n:14} {v.get('description', '')}")
+    print("\ntools (--tools a,b,c)")
+    for n, v in cat["tools"].items():
+        src = "  [built in]" if v.get("builtin") else ("  [artifactory]" if v.get("artifact") else "")
+        print(f"  {n:14} {v.get('description', '')}{src}")
+    print("\nprofiles (--profile)")
+    for n, v in cat["profiles"].items():
+        print(f"  {n:12} [{v.get('tier', 'standard')}] {v.get('description', '')}")
+    print("\nisolation (--isolation)")
+    for n, v in cat["isolation"].items():
+        print(f"  {n:12} {v.get('description', '')}")
+    return 0
+
+
+def cmd_cluster(args, k: Kube) -> int:
+    """Which cluster am I talking to, and what is running on it?"""
+    ctx = k.run(["config", "current-context"], ns=NO_NS, check=False).stdout.strip() or "(none)"
+    server = k.run(["config", "view", "--minify", "-o", "jsonpath={.clusters[0].cluster.server}"], ns=NO_NS, check=False).stdout.strip()
+    who = k.whoami() or "?"
+    ver = k.run(["version", "-o", "json"], ns=NO_NS, check=False)
+    sver = "?"
+    if ver.returncode == 0:
+        try:
+            sver = json.loads(ver.stdout).get("serverVersion", {}).get("gitVersion", "?")
+        except json.JSONDecodeError:
+            pass
+    print(f"context   {ctx}")
+    print(f"server    {server or '?'}   kubernetes {sver}")
+    print(f"you are   {who}")
+    if args.contexts:
+        print("\ncontexts (kubectl config use-context NAME to switch)")
+        print(k.run(["config", "get-contexts"], ns=NO_NS, check=False).stdout.rstrip())
+    nodes = k.get("nodes", ns=NO_NS) or {"items": []}
+    print(f"\nnodes ({len(nodes['items'])})")
+    for n in nodes["items"]:
+        m, st = n["metadata"], n.get("status", {})
+        ready = next((c["status"] for c in st.get("conditions", []) if c["type"] == "Ready"), "Unknown")
+        roles = ",".join(l.split("/", 1)[1] for l in m.get("labels", {}) if l.startswith("node-role.kubernetes.io/")) or "worker"
+        lab = "  [lab pool]" if m.get("labels", {}).get("devspaces.io/lab") == "true" else ""
+        ni = st.get("nodeInfo", {})
+        print(f"  {m['name']:32} {'Ready' if ready == 'True' else 'NotReady':9} {roles:14} {ni.get('kubeletVersion', '?'):10} {ni.get('architecture', '?'):6} {ni.get('containerRuntimeVersion', '')}{lab}")
+    sysns = k.get("deployments", ns=SYSTEM_NS) or {}
+    if sysns.get("items"):
+        print(f"\nplatform ({SYSTEM_NS})")
+        for d in sysns["items"]:
+            print(f"  deploy/{d['metadata']['name']:28} {d.get('status', {}).get('readyReplicas', 0)}/{d['spec'].get('replicas', 0)} ready")
+        for cj in (k.get("cronjobs", ns=SYSTEM_NS) or {}).get("items", []):
+            print(f"  cronjob/{cj['metadata']['name']:27} schedule {cj['spec'].get('schedule')}  last run {cj.get('status', {}).get('lastScheduleTime', '-')}")
+    else:
+        print(f"\nplatform: namespace {SYSTEM_NS} not found on this cluster (kubectl apply -k deploy/platform)")
+    tenants = (k.get("namespaces", ns=NO_NS, selector=LABEL_TENANT) or {}).get("items", [])
+    tenants = [t for t in tenants if not args.mine or t["metadata"]["name"] == resolve_namespace(args, k)] if args.mine else tenants
+    print(f"\nworkspace namespaces ({len(tenants)})")
+    if not tenants:
+        print("  none — workspace admin onboard <user>")
+    for t in tenants:
+        ns = t["metadata"]["name"]
+        tier = t["metadata"].get("labels", {}).get(LABEL_TIER, "?")
+        pods = (k.get("pods", ns=ns) or {}).get("items", [])
+        sts = (k.get("statefulsets", ns=ns, selector=LABEL_WS) or {}).get("items", [])
+        print(f"  {ns:28} tier={tier:9} workspaces={len(sts)} pods={len(pods)}")
+        for p in pods:
+            st = p["status"]
+            ready = sum(1 for c in st.get("containerStatuses", []) if c.get("ready"))
+            total = len(p["spec"].get("containers", []))
+            restarts = sum(c.get("restartCount", 0) for c in st.get("containerStatuses", []))
+            waiting = next((c["state"]["waiting"].get("reason") for c in st.get("containerStatuses", []) if c.get("state", {}).get("waiting")), "")
+            print(f"      pod/{p['metadata']['name']:24} {st.get('phase', '?'):10} {ready}/{total} ready  restarts={restarts}  node={p['spec'].get('nodeName', '-')}  {waiting}")
+    if args.all:
+        print("\nall pods (kubectl get pods -A)")
+        print(k.run(["get", "pods", "-A", "-o", "wide"], ns=NO_NS, check=False).stdout.rstrip())
+    return 0
+
+
+def cmd_admin_onboard(args, k: Kube) -> int:
+    cat = load_catalog(k)
+    user = sanitize_user(args.user)
+    subject = args.subject or args.user
+    opts = {"cpu": args.cpu, "memory": args.memory, "storage": args.storage,
+            "subject": subject, "subject_kind": "Group" if args.group else "User"}
+    api_ips, api_ports = ([], []) if args.dry_run and args.offline else apiserver_endpoints(k)
+    objs = render_tenant(user, "standard", cat, opts, api_ips, api_ports)
+    if args.lab:
+        objs += render_tenant(user, "lab", cat, opts, api_ips, api_ports)
+    if cat.get("pullSecret"):
+        src = k.get("secret", cat["pullSecret"], ns=SYSTEM_NS)
+        if src:
+            for ns in {o["metadata"]["name"] for o in objs if o["kind"] == "Namespace"}:
+                objs.append({"apiVersion": "v1", "kind": "Secret", "type": src["type"], "data": src["data"],
+                             "metadata": {"name": cat["pullSecret"], "namespace": ns}})
+        else:
+            warn(f"pull secret {SYSTEM_NS}/{cat['pullSecret']} not found; workspaces may fail to pull images")
+    if args.dry_run:
+        sys.stdout.write(dump_objects(objs))
+        return 0
+    for line in k.apply(objs).strip().splitlines():
+        info(line)
+    print(f"onboarded {subject}: namespace ws-{user}" + (f" and ws-{user}-lab" if args.lab else ""))
+    print(f"they can now run: workspace create --lang dev --namespace ws-{user}  "
+          f"(the namespace is inferred when their kubectl identity is {subject})")
+    return 0
+
+
+def cmd_admin_reap(args, k: Kube) -> int:
+    cat = load_catalog(k)
+    default_idle = cat["defaults"]["idleTimeout"]
+    extra = ["-A"] if args.all_namespaces else []
+    ns = NO_NS if args.all_namespaces else resolve_namespace(args, k)
+    now, stopped = utcnow(), 0
+    for sts in (k.get("statefulsets", ns=ns, selector=LABEL_WS, extra=extra) or {}).get("items", []):
+        m = sts["metadata"]
+        sns, obj = m["namespace"], m["name"]
+        if (sts["spec"].get("replicas") or 0) == 0:
+            continue
+        timeout = parse_duration(m.get("annotations", {}).get(ANN_IDLE, default_idle))
+        if timeout <= 0:
+            continue
+        pod = k.get("pod", f"{obj}-0", ns=sns)
+        if not pod:
+            continue
+        last = pod["metadata"].get("annotations", {}).get(ANN_ACTIVE) or pod["status"].get("startTime")
+        if not last:
+            continue
+        idle = (now - parse_ts(last)).total_seconds()
+        if idle > timeout:
+            print(f"{sns}/{obj}: idle {human_duration(idle)} > {human_duration(timeout)} → stopping"
+                  + (" (dry run)" if args.dry_run else ""))
+            if not args.dry_run:
+                k.run(["scale", "statefulset", obj, "--replicas=0"], ns=sns)
+            stopped += 1
+        elif args.verbose:
+            print(f"{sns}/{obj}: idle {human_duration(idle)} / {human_duration(timeout)}")
+    print(f"reaper: {stopped} workspace(s) stopped")
+    return 0
+
+# ------------------------------------------------------------ drives / snapshots
+def _drive_rows(k: Kube, ns, extra=None):
+    pvcs = (k.get("persistentvolumeclaims", ns=ns, selector=LABEL_DRIVE, extra=extra) or {}).get("items", [])
+    sts = (k.get("statefulsets", ns=ns, selector=LABEL_WS, extra=extra) or {}).get("items", [])
+    attached: dict[tuple[str, str], list[str]] = {}
+    for st in sts:
+        for v in st["spec"]["template"]["spec"].get("volumes", []):
+            c = v.get("persistentVolumeClaim", {}).get("claimName")
+            if c:
+                attached.setdefault((st["metadata"]["namespace"], c), []).append(st["metadata"]["labels"].get(LABEL_WS, st["metadata"]["name"]))
+    return pvcs, attached
+
+
+def cmd_drives_list(args, k: Kube) -> int:
+    extra = ["-A"] if args.all_namespaces else []
+    ns = NO_NS if args.all_namespaces else resolve_namespace(args, k)
+    pvcs, attached = _drive_rows(k, ns, extra)
+    rows = [("NAMESPACE", "DRIVE", "KIND", "SIZE", "STORAGE", "STATUS", "USED-BY", "LAST-WORKSPACE", "LANGUAGES")]
+    for p in sorted(pvcs, key=lambda p: (p["metadata"]["namespace"], p["metadata"]["name"])):
+        m = p["metadata"]; a = m.get("annotations", {}); l = m.get("labels", {})
+        used = attached.get((m["namespace"], m["name"]), [])
+        kind = l.get(LABEL_DRIVE, "?")
+        status = p.get("status", {}).get("phase", "?")
+        if kind == "home":
+            status = "attached" if used else ("DETACHED" if status == "Bound" else status)
+        rows.append((m["namespace"], m["name"], kind,
+                     p.get("status", {}).get("capacity", {}).get("storage") or p["spec"]["resources"]["requests"]["storage"],
+                     a.get(ANN_STORAGE) or p["spec"].get("storageClassName") or "default", status,
+                     ",".join(used) or "-", a.get(ANN_LAST_WS, "-"), a.get(ANN_LANGS, "-")))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+    if len(rows) == 1:
+        info("no drives yet; `workspace create` makes a home drive per workspace")
+    else:
+        info("DETACHED = the workspace was deleted but your files are here: workspace create NEW --lang … --from-drive DRIVE")
+    return 0
+
+
+def _find_drive(k: Kube, ns: str, ref: str) -> dict:
+    """ref is a drive (PVC) name or a workspace name."""
+    pvc = k.get("persistentvolumeclaim", ref, ns=ns)
+    if pvc and pvc["metadata"].get("labels", {}).get(LABEL_DRIVE):
+        return pvc
+    sts = k.get("statefulset", ssh_alias(ref), ns=ns)
+    if sts:
+        drive = json.loads(sts["metadata"].get("annotations", {}).get(ANN_SPEC, "{}")).get("drive") or f"{ssh_alias(ref)}-home"
+        pvc = k.get("persistentvolumeclaim", drive, ns=ns)
+        if pvc:
+            return pvc
+    raise CliError(f"no drive or workspace named {ref!r} in {ns} (workspace drives list)")
+
+
+def _snapshots(k: Kube, ns, drive: str | None = None) -> list[dict]:
+    sel = f"{LABEL_DRIVE}={drive}" if drive else LABEL_DRIVE
+    res = k.get("volumesnapshots", ns=ns, selector=sel)
+    return (res or {}).get("items", [])
+
+
+def cmd_drives_show(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    p = _find_drive(k, ns, args.drive)
+    m = p["metadata"]; a = m.get("annotations", {})
+    _, attached = _drive_rows(k, ns)
+    used = attached.get((ns, m["name"]), [])
+    print(f"drive {m['name']}  (namespace {ns})")
+    print(f"  kind        {m.get('labels', {}).get(LABEL_DRIVE)}   access {','.join(p['spec'].get('accessModes', []))}")
+    print(f"  size        {p.get('status', {}).get('capacity', {}).get('storage') or p['spec']['resources']['requests']['storage']}  class={p['spec'].get('storageClassName') or 'default'}  choice={a.get(ANN_STORAGE) or '-'}")
+    print(f"  phase       {p.get('status', {}).get('phase')}   volume={p['spec'].get('volumeName', '-')}")
+    print(f"  used by     {', '.join(used) or 'nobody (DETACHED — create --from-drive ' + m['name'] + ')'}")
+    print(f"  history     last workspace {a.get(ANN_LAST_WS, '-')}, languages {a.get(ANN_LANGS, '-')}, created {m.get('creationTimestamp', '-')}")
+    print(f"  protected   {'no (allow-delete set)' if a.get(ANN_ALLOW_DELETE) == 'true' else 'yes — only `drives delete` / `delete --purge` can remove it'}")
+    snaps = _snapshots(k, ns, m["name"])
+    if snaps:
+        print("  snapshots")
+        for sn in snaps:
+            st = sn.get("status", {})
+            print(f"    {sn['metadata']['name']:40} ready={st.get('readyToUse')}  size={st.get('restoreSize', '-')}  {sn['metadata'].get('creationTimestamp', '')}")
+    return 0
+
+
+def cmd_drives_delete(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    p = _find_drive(k, ns, args.drive)
+    name = p["metadata"]["name"]
+    _, attached = _drive_rows(k, ns)
+    if attached.get((ns, name)):
+        raise CliError(f"{name} is attached to workspace {attached[(ns, name)][0]}; `workspace delete` that first (the drive stays), or use `workspace delete NAME --purge`")
+    if not args.yes and input(f"Delete drive {name} in {ns} FOR GOOD (files not pushed are lost)? [y/N] ").strip().lower() not in ("y", "yes"):
+        return 1
+    k.run(["annotate", "persistentvolumeclaim", name, f"{ANN_ALLOW_DELETE}=true", "--overwrite"], ns=ns)
+    k.run(["delete", "persistentvolumeclaim", name], ns=ns)
+    info(f"deleted {name} (the StorageClass's reclaimPolicy decides whether the cloud disk is kept for an admin to recover)")
+    return 0
+
+
+def cmd_drives_resize(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    p = _find_drive(k, ns, args.name)
+    name = p["metadata"]["name"]
+    k.run(["patch", "persistentvolumeclaim", name, "--type=merge", "-p",
+           json.dumps({"spec": {"resources": {"requests": {"storage": args.size}}}})], ns=ns)
+    info(f"requested {args.size} for {name}; the filesystem grows online if the StorageClass allows expansion "
+         f"(some drivers need the pod restarted: workspace stop/start)")
+    return 0
+
+
+def cmd_drives_snapshot(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    cat = load_catalog(k)
+    p = _find_drive(k, ns, args.name)
+    drive = p["metadata"]["name"]
+    snap = args.snapshot_name or f"{drive}-{utcnow().strftime('%Y%m%d-%H%M%S')}"
+    obj = {"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshot",
+           "metadata": {"name": snap, "namespace": ns, "labels": {LABEL_DRIVE: drive, LABEL_MANAGED: "workspace-cli"},
+                        "annotations": {ANN_LANGS: p["metadata"].get("annotations", {}).get(ANN_LANGS, ""),
+                                        ANN_LAST_WS: p["metadata"].get("annotations", {}).get(ANN_LAST_WS, "")}},
+           "spec": {"source": {"persistentVolumeClaimName": drive}}}
+    sc = (cat.get("storage") or {}).get("snapshotClass")
+    if sc:
+        obj["spec"]["volumeSnapshotClassName"] = sc
+    k.apply([obj])
+    info(f"snapshot {snap} of {drive} requested (CSI; consistent for files at rest — pause heavy writes first)")
+    if args.wait:
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            sn = k.get("volumesnapshot", snap, ns=ns) or {}
+            if sn.get("status", {}).get("readyToUse"):
+                info(f"ready: size {sn['status'].get('restoreSize', '-')}")
+                break
+            err = sn.get("status", {}).get("error", {}).get("message")
+            if err:
+                raise CliError(f"snapshot failed: {err}")
+            time.sleep(5)
+    print(f"restore into a new workspace:  workspace create NEW --lang … --from-snapshot {snap}")
+    return 0
+
+
+def cmd_drives_snapshots(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    drive = _find_drive(k, ns, args.name)["metadata"]["name"] if args.name else None
+    rows = [("SNAPSHOT", "DRIVE", "READY", "SIZE", "LANGUAGES", "CREATED")]
+    for sn in _snapshots(k, ns, drive):
+        st = sn.get("status", {}); m = sn["metadata"]
+        rows.append((m["name"], m.get("labels", {}).get(LABEL_DRIVE, "-"), str(st.get("readyToUse", False)),
+                     str(st.get("restoreSize", "-")), m.get("annotations", {}).get(ANN_LANGS, "-"), m.get("creationTimestamp", "-")))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+    return 0
+
+
+def cmd_drives_delete_snapshot(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    k.run(["delete", "volumesnapshot", args.snapshot], ns=ns)
+    info(f"deleted snapshot {args.snapshot}")
+    return 0
+
+
+def render_shared_drive(ns: str, name: str, size: str, choice: dict, owner: str) -> dict:
+    pvc = {"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+           "metadata": {"name": f"shared-{name}", "namespace": ns,
+                        "labels": {LABEL_DRIVE: "shared", LABEL_MANAGED: "workspace-cli", LABEL_TENANT: owner},
+                        "annotations": {ANN_STORAGE: choice.get("name", "")}},
+           "spec": {"accessModes": list(choice.get("accessModes") or ["ReadWriteMany"]),
+                    "resources": {"requests": {"storage": size}}}}
+    if choice.get("storageClass"):
+        pvc["spec"]["storageClassName"] = choice["storageClass"]
+    return pvc
+
+
+def cmd_drives_create_shared(args, k: Kube) -> int:
+    cat = load_catalog(k)
+    ns = resolve_namespace(args, k)
+    if not NAME_RE.match(args.drive):
+        raise CliError("drive name must be lowercase alphanumeric/dashes")
+    choice = storage_choice(cat, args.storage, "shared")
+    if "ReadWriteMany" not in (choice.get("accessModes") or []):
+        warn(f"storage choice {choice.get('name') or 'default'} is not ReadWriteMany: only one workspace at a time will be able to mount it")
+    obj = render_shared_drive(ns, args.drive, args.size, choice, ns.removeprefix("ws-"))
+    if args.dry_run:
+        sys.stdout.write(dump_objects([obj])); return 0
+    k.apply([obj])
+    print(f"shared drive shared-{args.drive} ({args.size}) created in {ns}\n"
+          f"  mount it:   workspace create api --lang go --mount shared:{args.drive}    → /shared/{args.drive}\n"
+          f"  share it:   portal → Drives → Share, or an admin: workspace share drive {args.drive} bob@corp.example --apply")
+    return 0
+
+
+# ------------------------------------------------------------ sharing (workspace access)
+def _guest_role(ns: str, name: str) -> dict:
+    obj = ssh_alias(name)
+    return {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+            "metadata": {"name": f"workspace-guest-{name}", "namespace": ns, "labels": {LABEL_WS: name, LABEL_MANAGED: "workspace-cli"}},
+            "rules": [{"apiGroups": [""], "resources": ["pods"], "resourceNames": [f"{obj}-0"], "verbs": ["get"]},
+                      {"apiGroups": [""], "resources": ["pods/exec", "pods/portforward"], "resourceNames": [f"{obj}-0"], "verbs": ["create", "get"]},
+                      {"apiGroups": ["apps"], "resources": ["statefulsets"], "resourceNames": [obj], "verbs": ["get"]},
+                      {"apiGroups": ["apps"], "resources": ["statefulsets/scale"], "resourceNames": [obj], "verbs": ["get", "patch", "update"]},
+                      {"apiGroups": [""], "resources": ["services"], "resourceNames": [obj], "verbs": ["get"]},
+                      {"apiGroups": [""], "resources": ["secrets"], "resourceNames": [f"{obj}-ssh"], "verbs": ["get"]}]}
+
+
+def _guest_binding(ns: str, name: str, user: str) -> dict:
+    return {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+            "metadata": {"name": f"share-{name}-{sanitize_user(user)}", "namespace": ns,
+                         "labels": {LABEL_WS: name, LABEL_SHARE: "workspace", LABEL_GUEST: sanitize_user(user), LABEL_MANAGED: "workspace-cli"},
+                         "annotations": {ANN_GUEST_USER: user}},
+            "subjects": [{"kind": "User", "name": user, "apiGroup": "rbac.authorization.k8s.io"}],
+            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": f"workspace-guest-{name}"}}
+
+
+def cmd_share_add(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    obj = ssh_alias(args.name)
+    get_workspace(k, ns, args.name)
+    if not args.key:
+        raise CliError("--key FILE with the guest's SSH public key is required from the CLI (the portal can look it up in their profile)")
+    pub = Path(args.key).read_text().strip().splitlines()
+    pub = [l for l in pub if l and not l.startswith("#")]
+    if not pub or not re.match(r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+|sk-\S+) AAAA", pub[0]):
+        raise CliError(f"{args.key} does not look like an OpenSSH public key")
+    guest_line = " ".join(pub[0].split()[:2]) + f" guest:{args.user}"
+    secret = k.get("secret", f"{obj}-ssh", ns=ns) or {}
+    authorized = b64d(secret.get("data", {}).get("authorized_keys", ""))
+    lines = [l for l in authorized.splitlines() if l.strip() and not l.endswith(f" guest:{args.user}")] + [guest_line]
+    k.run(["patch", "secret", f"{obj}-ssh", "--type=merge", "-p", json.dumps({"stringData": {"authorized_keys": "\n".join(lines) + "\n"}})], ns=ns)
+    k.apply([_guest_role(ns, args.name), _guest_binding(ns, args.name, args.user)])
+    owner = ns.removeprefix("ws-")
+    print(f"shared {args.name} with {args.user}. They connect with:\n"
+          f"  workspace ssh {owner}/{args.name}        (CLI, needs kubectl access to this cluster)\n"
+          f"  wsctl ssh {owner}/{args.name}            (Go CLI through the portal)\n"
+          f"  portal → Shared with me → {args.name}\n"
+          f"The key is live within a minute (sshd reads the Secret mount). Revoke: workspace share rm {args.name} {args.user}")
+    return 0
+
+
+def cmd_share_rm(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    obj = ssh_alias(args.name)
+    secret = k.get("secret", f"{obj}-ssh", ns=ns) or {}
+    authorized = b64d(secret.get("data", {}).get("authorized_keys", ""))
+    lines = [l for l in authorized.splitlines() if l.strip() and not l.endswith(f" guest:{args.user}")]
+    k.run(["patch", "secret", f"{obj}-ssh", "--type=merge", "-p", json.dumps({"stringData": {"authorized_keys": "\n".join(lines) + "\n"}})], ns=ns)
+    k.run(["delete", "rolebinding", f"share-{args.name}-{sanitize_user(args.user)}", "--ignore-not-found"], ns=ns)
+    info(f"revoked {args.user} from {args.name}")
+    return 0
+
+
+def cmd_share_list(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    rbs = (k.get("rolebindings", ns=ns, selector=f"{LABEL_SHARE}=workspace,{LABEL_WS}={args.name}") or {}).get("items", [])
+    if not rbs:
+        info(f"{args.name} is not shared with anyone"); return 0
+    for rb in rbs:
+        print(f"{rb['metadata'].get('annotations', {}).get(ANN_GUEST_USER) or rb['subjects'][0]['name']:40} since {rb['metadata'].get('creationTimestamp', '')}")
+    return 0
+
+
+def render_shared_mount(src_pv: dict, owner_short: str, drive: str, guest_ns: str, read_only: bool) -> list[dict]:
+    """A static PV+PVC in the guest's namespace pointing at the SAME CSI volume as the owner's shared drive."""
+    csi = src_pv["spec"].get("csi")
+    if not csi:
+        raise CliError("only CSI-backed shared drives can be shared across namespaces")
+    pvc_name = f"shared-{owner_short}-{drive}"
+    pv_name = f"{pvc_name}-{guest_ns.removeprefix('ws-')}"
+    pv = {"apiVersion": "v1", "kind": "PersistentVolume",
+          "metadata": {"name": pv_name, "labels": {LABEL_DRIVE: "shared-mount", "devspaces.io/shared-by": owner_short, LABEL_MANAGED: "workspace-cli"}},
+          "spec": {"capacity": src_pv["spec"]["capacity"], "accessModes": src_pv["spec"]["accessModes"],
+                   "persistentVolumeReclaimPolicy": "Retain", "storageClassName": src_pv["spec"].get("storageClassName", ""),
+                   "mountOptions": src_pv["spec"].get("mountOptions", []),
+                   "csi": {**csi, "readOnly": bool(read_only)},
+                   "claimRef": {"namespace": guest_ns, "name": pvc_name}}}
+    pvc = {"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+           "metadata": {"name": pvc_name, "namespace": guest_ns,
+                        "labels": {LABEL_DRIVE: "shared-mount", "devspaces.io/shared-by": owner_short, LABEL_MANAGED: "workspace-cli"},
+                        "annotations": {ANN_STORAGE: "shared"}},
+           "spec": {"accessModes": src_pv["spec"]["accessModes"], "volumeName": pv_name,
+                    "storageClassName": src_pv["spec"].get("storageClassName", ""),
+                    "resources": {"requests": {"storage": src_pv["spec"]["capacity"]["storage"]}}}}
+    return [pv, pvc]
+
+
+def cmd_share_drive(args, k: Kube) -> int:
+    """Needs cluster rights (PV create + the guest namespace): meant for the portal or an admin."""
+    ns = resolve_namespace(args, k)
+    pvc = k.get("persistentvolumeclaim", f"shared-{args.drive}", ns=ns)
+    if not pvc:
+        raise CliError(f"shared drive shared-{args.drive} not found in {ns}")
+    if "ReadWriteMany" not in pvc["spec"].get("accessModes", []):
+        raise CliError("only ReadWriteMany drives can be shared; home drives are single-writer disks — share the workspace instead")
+    pv = k.get("persistentvolume", pvc["spec"].get("volumeName", ""), ns=NO_NS)
+    if not pv:
+        raise CliError("the drive is not bound to a volume yet")
+    objs = render_shared_mount(pv, ns.removeprefix("ws-"), args.drive, tenant_namespace(sanitize_user(args.user), "standard"), args.read_only)
+    if not args.apply:
+        sys.stdout.write(dump_objects(objs))
+        info("printed only; add --apply (needs cluster-admin-ish rights) or do it from the portal")
+        return 0
+    k.apply(objs)
+    print(f"{args.user} can now mount it:  wsctl create … --mount shared:{ns.removeprefix('ws-')}/{args.drive}")
+    return 0
+
+
+# ------------------------------------------------------------ links (pod-to-pod across namespaces)
+def _peer_policy_name(name: str, peer_ns: str, peer_ws: str) -> str:
+    return f"peer-{name}-{peer_ns.removeprefix('ws-')}-{peer_ws}"[:63].rstrip("-")
+
+
+def render_link(ns: str, name: str, peer_ns: str, peer_ws: str, ports: list[int]) -> dict:
+    tenant = peer_ns.removeprefix("ws-")
+    peer_sel = [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": peer_ns}},
+                 "podSelector": {"matchLabels": {LABEL_WS: peer_ws}}}]
+    port_spec = [{"protocol": "TCP", "port": p} for p in ports]
+    ingress = [{"from": peer_sel, **({"ports": port_spec} if port_spec else {})}]
+    egress = [{"to": peer_sel}]  # replies and client connections; the peer's own ingress rule limits ports
+    return {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+            "metadata": {"name": _peer_policy_name(name, peer_ns, peer_ws), "namespace": ns,
+                         "labels": {LABEL_WS: name, LABEL_LINK: "peer", LABEL_MANAGED: "workspace-cli"},
+                         "annotations": {ANN_PEER: f"{tenant}/{peer_ws}"}},
+            "spec": {"podSelector": {"matchLabels": {LABEL_WS: name}}, "policyTypes": ["Ingress", "Egress"],
+                     "ingress": ingress, "egress": egress}}
+
+
+def cmd_link_add(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    get_workspace(k, ns, args.name)
+    peer_ns, peer_ws = split_ref(args.to)
+    if not peer_ns:
+        raise CliError("--to expects OWNER/WORKSPACE (workspaces in your own namespace are already connected)")
+    ports = [int(p) for p in args.ports.split(",") if p.strip()] if args.ports else []
+    k.apply([render_link(ns, args.name, peer_ns, peer_ws, ports)])
+    me = ns.removeprefix("ws-")
+    print(f"{args.name} now accepts traffic from {args.to}{' on ports ' + args.ports if ports else ''} and may call it.\n"
+          f"  Ask them to link back (traffic is allowed only when BOTH sides agree):\n"
+          f"    workspace link add {peer_ws} --to {me}/{args.name}\n"
+          f"  Then from either side:  curl http://{ssh_alias(peer_ws)}.{peer_ns}.svc.cluster.local:PORT")
+    return 0
+
+
+def cmd_link_rm(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    peer_ns, peer_ws = split_ref(args.to)
+    k.run(["delete", "networkpolicy", _peer_policy_name(args.name, peer_ns or ns, peer_ws), "--ignore-not-found"], ns=ns)
+    info("link removed on your side")
+    return 0
+
+
+def _links(k: Kube, ns: str, name: str) -> list[dict]:
+    return (k.get("networkpolicies", ns=ns, selector=f"{LABEL_LINK}=peer,{LABEL_WS}={name}") or {}).get("items", [])
+
+
+def cmd_link_list(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    links = _links(k, ns, args.name)
+    if not links:
+        info(f"{args.name} has no cross-namespace links (same-namespace workspaces need none)"); return 0
+    for np in links:
+        peer = np["metadata"].get("annotations", {}).get(ANN_PEER, "?")
+        ports = ",".join(str(p["port"]) for p in (np["spec"].get("ingress") or [{}])[0].get("ports", [])) or "all"
+        tenant, _, pws = peer.partition("/")
+        back = k.get("networkpolicy", _peer_policy_name(pws, ns, args.name), ns=f"ws-{tenant}") if not k.offline else None
+        print(f"{peer:40} ports={ports:10} {'linked' if back else 'pending-peer (they have not linked back, or you may not read their namespace)'}")
+    return 0
+
+
+def cmd_net(args, k: Kube) -> int:
+    ns = resolve_namespace(args, k)
+    obj = ssh_alias(args.name)
+    sts = get_workspace(k, ns, args.name)
+    spec = json.loads(sts["metadata"].get("annotations", {}).get(ANN_SPEC, "{}"))
+    pod = k.get("pod", f"{obj}-0", ns=ns) or {}
+    nsobj = k.get("namespace", ns, ns=NO_NS) or {}
+    print(f"workspace {args.name}  namespace {ns}" + ("  (project namespace)" if nsobj.get("metadata", {}).get("labels", {}).get(LABEL_KIND) == "project" else ""))
+    print(f"  dns         {obj}.{ns}.svc.cluster.local   (short: {obj} from inside {ns})")
+    print(f"  pod ip      {pod.get('status', {}).get('podIP') or '- (stopped)'}")
+    print(f"  multicast   {('on, interface ' + (mcast_iface(load_catalog(k)) or 'eth0')) if spec.get('multicast') else 'off'}")
+    nsl = nsobj.get("metadata", {}).get("labels", {})
+    mesh = ("istio-ambient" if nsl.get("istio.io/dataplane-mode") == "ambient" else
+            f"istio-sidecar (rev {nsl.get('istio.io/rev')})" if nsl.get("istio.io/rev") else
+            "istio-sidecar" if nsl.get("istio-injection") == "enabled" else "none (plain NetworkPolicy + DNS)")
+    print(f"  mesh        {mesh}")
+    others = [s["metadata"]["labels"].get(LABEL_WS) for s in (k.get("statefulsets", ns=ns, selector=LABEL_WS) or {}).get("items", [])
+              if s["metadata"]["labels"].get(LABEL_WS) != args.name]
+    print(f"  same ns     {', '.join(others) if others else 'no other workspaces'}   ← already reachable on every port, no link needed")
+    links = _links(k, ns, args.name)
+    print(f"  links       {', '.join(np['metadata'].get('annotations', {}).get(ANN_PEER, '?') for np in links) or 'none (workspace link add …)'}")
+    print("  test        from another workspace:  curl http://%s.%s.svc.cluster.local:8000   (python3 -m http.server here)" % (obj, ns))
+    return 0
+
+
+# ------------------------------------------------------------ admin: projects
+def cmd_admin_project_create(args, k: Kube) -> int:
+    cat = load_catalog(k)
+    if not NAME_RE.match(args.name):
+        raise CliError("project name must be lowercase alphanumeric/dashes")
+    members = [m.strip() for m in args.members.split(",") if m.strip() and not m.strip().startswith("group:")]
+    groups = [g.strip() for g in args.groups.split(",") if g.strip()] + \
+             [m.strip()[6:] for m in args.members.split(",") if m.strip().startswith("group:")]
+    if not members and not groups:
+        raise CliError("give --members and/or --groups")
+    subjects = [{"kind": "User", "name": m, "apiGroup": "rbac.authorization.k8s.io"} for m in members] + \
+               [{"kind": "Group", "name": g, "apiGroup": "rbac.authorization.k8s.io"} for g in groups]
+    opts = {"cpu": args.cpu, "memory": args.memory, "storage": args.storage, "subject": "", "subject_kind": "User"}
+    api_ips, api_ports = ([], []) if args.dry_run and args.offline else apiserver_endpoints(k)
+    objs = render_tenant(f"proj-{args.name}", "lab" if args.lab else "standard", cat, opts, api_ips, api_ports,
+                         ns=project_namespace(args.name), subjects=subjects,
+                         extra_labels={LABEL_KIND: "project", "devspaces.io/project": args.name},
+                         ns_annotations={ANN_MEMBERS: ",".join(members), "devspaces.io/member-groups": ",".join(groups)})
+    if cat.get("pullSecret") and not (args.dry_run and args.offline):
+        src = k.get("secret", cat["pullSecret"], ns=SYSTEM_NS)
+        if src:
+            objs.append({"apiVersion": "v1", "kind": "Secret", "type": src["type"], "data": src["data"],
+                         "metadata": {"name": cat["pullSecret"], "namespace": project_namespace(args.name)}})
+    if args.dry_run:
+        sys.stdout.write(dump_objects(objs)); return 0
+    for line in k.apply(objs).strip().splitlines():
+        info(line)
+    print(f"project {args.name}: namespace {project_namespace(args.name)}, members {', '.join(members + groups)}\n"
+          f"  they create workspaces there with:  workspace --project {args.name} create api --lang go\n"
+          f"  everything inside talks freely; names: ws-<name>.{project_namespace(args.name)}.svc.cluster.local")
+    return 0
+
+
+def cmd_admin_project_members(args, k: Kube) -> int:
+    """Add/remove members of an existing project (re-renders the RoleBinding + annotations)."""
+    ns = project_namespace(args.name)
+    nsobj = k.get("namespace", ns, ns=NO_NS)
+    if not nsobj:
+        raise CliError(f"project {args.name} not found ({ns})")
+    ann = nsobj["metadata"].get("annotations", {})
+    members = [m for m in ann.get(ANN_MEMBERS, "").split(",") if m]
+    groups = [g for g in ann.get("devspaces.io/member-groups", "").split(",") if g]
+    for m in [x.strip() for x in (args.add or "").split(",") if x.strip()]:
+        (groups if m.startswith("group:") else members).append(m[6:] if m.startswith("group:") else m)
+    for m in [x.strip() for x in (args.remove or "").split(",") if x.strip()]:
+        tgt = m[6:] if m.startswith("group:") else m
+        members = [x for x in members if x != tgt]; groups = [x for x in groups if x != tgt]
+    members, groups = sorted(set(members)), sorted(set(groups))
+    subjects = [{"kind": "User", "name": m, "apiGroup": "rbac.authorization.k8s.io"} for m in members] + \
+               [{"kind": "Group", "name": g, "apiGroup": "rbac.authorization.k8s.io"} for g in groups]
+    if not subjects:
+        raise CliError("a project needs at least one member")
+    rb = {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+          "metadata": {"name": "workspace-developer", "namespace": ns, "labels": {LABEL_MANAGED: "workspace-cli"}},
+          "subjects": subjects,
+          "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "workspace-developer"}}
+    k.apply([rb])
+    k.run(["annotate", "namespace", ns, f"{ANN_MEMBERS}={','.join(members)}", f"devspaces.io/member-groups={','.join(groups)}", "--overwrite"], ns=NO_NS)
+    print(f"project {args.name}: members {', '.join(members) or '-'}; groups {', '.join(groups) or '-'}")
+    return 0
+
+
+def cmd_admin_project_list(args, k: Kube) -> int:
+    items = (k.get("namespaces", ns=NO_NS, selector=f"{LABEL_KIND}=project") or {}).get("items", [])
+    rows = [("PROJECT", "NAMESPACE", "TIER", "MEMBERS", "GROUPS")]
+    for n in items:
+        m = n["metadata"]
+        rows.append((m["labels"].get("devspaces.io/project", "-"), m["name"], m["labels"].get(LABEL_TIER, "-"),
+                     m.get("annotations", {}).get(ANN_MEMBERS, "-") or "-", m.get("annotations", {}).get("devspaces.io/member-groups", "-") or "-"))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        print("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+    return 0
+
+
+def cmd_admin_project_delete(args, k: Kube) -> int:
+    ns = project_namespace(args.name)
+    if not args.yes and input(f"Delete {ns} and EVERYTHING in it (workspaces, drives)? [y/N] ").strip().lower() not in ("y", "yes"):
+        return 1
+    for p in (k.get("persistentvolumeclaims", ns=ns, selector=f"{LABEL_DRIVE}=home") or {}).get("items", []):
+        k.run(["annotate", "persistentvolumeclaim", p["metadata"]["name"], f"{ANN_ALLOW_DELETE}=true", "--overwrite"], ns=ns, check=False)
+    k.run(["delete", "namespace", ns], ns=NO_NS)
+    info(f"deleted {ns}")
+    return 0
+
+
+# ---------------------------------------------------------------------- parser
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="workspace", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version=f"workspace {VERSION}")
+    p.add_argument("-n", "--namespace", help="tenant namespace (default: ws-<your username>)")
+    p.add_argument("--context", help="kubeconfig context")
+    p.add_argument("--catalog", metavar="FILE", help="use this catalog.json instead of the cluster ConfigMap (GitOps/CI, --offline)")
+    # The same two options are accepted after the subcommand too (`workspace list -n x`);
+    # SUPPRESS keeps an unset sub-level option from clobbering the top-level value.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("-n", "--namespace", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    common.add_argument("--context", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    common.add_argument("--project", default=argparse.SUPPRESS, help="work in the team project namespace ws-proj-NAME")
+    p.add_argument("--project", help="work in the team project namespace ws-proj-NAME")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def add(name, fn, help, **kw):
+        sp = sub.add_parser(name, help=help, parents=[common], **kw)
+        sp.set_defaults(func=fn)
+        return sp
+
+    c = add("create", cmd_create, "create (or update) a workspace")
+    c.add_argument("name", nargs="?", help="workspace name (default: the language)")
+    c.add_argument("--lang", required=True, help="language(s) from the catalog, e.g. rust or go,python (first one picks the image)")
+    c.add_argument("--tools", help="comma-separated tools from the catalog, e.g. cmake,git,gdb,ripgrep")
+    c.add_argument("--tag", help="image tag to use instead of the catalog default (see `workspace catalog`)")
+    c.add_argument("--repo", help="git URL to clone on first boot (ssh:// or git@ for pushes)")
+    c.add_argument("--branch")
+    c.add_argument("--dotfiles", help="git URL of a dotfiles repo; its install.sh runs on first boot")
+    c.add_argument("--git-auth", choices=["deploy-key", "ssh", "token", "none"], default="deploy-key",
+                   help="deploy-key (default): a key only this workspace holds; ssh: --git-key; token: --git-token-stdin")
+    c.add_argument("--git-key", help="path to an SSH private key to copy into the workspace (sets --git-auth ssh)")
+    c.add_argument("--git-token-stdin", action="store_true", help="read an HTTPS token from stdin (sets --git-auth token)")
+    c.add_argument("--git-token-user", default="x-access-token")
+    c.add_argument("--git-agent", action="store_true", help="forward your local ssh-agent (ForwardAgent yes)")
+    c.add_argument("--git-name"), c.add_argument("--git-email")
+    c.add_argument("--rotate-git-key", action="store_true"), c.add_argument("--rotate-host-key", action="store_true")
+    c.add_argument("--profile", help="standard (default) | hardware | kernel — see `workspace catalog`")
+    c.add_argument("--isolation", help="userns (default) | gvisor | kata | none")
+    c.add_argument("--image", help="override the catalog image, e.g. a baked variant")
+    c.add_argument("--size", help="home drive size, e.g. 50Gi (only when the drive is created)")
+    c.add_argument("--storage", help="storage choice from the catalog, e.g. fast | standard (see `workspace catalog`)")
+    c.add_argument("--storage-class", help="raw StorageClass name (overrides --storage)")
+    c.add_argument("--from-drive", metavar="PVC", help="put this workspace on an existing (detached) home drive: `workspace drives list`")
+    c.add_argument("--from-snapshot", metavar="SNAPSHOT", help="create the home drive from a VolumeSnapshot: `workspace drives snapshots`")
+    c.add_argument("--mount", action="append", metavar="shared:NAME|shared:OWNER/NAME", help="mount a shared drive under /shared/NAME (repeatable)")
+    c.add_argument("--cpu"), c.add_argument("--memory"), c.add_argument("--cpu-request"), c.add_argument("--memory-request")
+    c.add_argument("--multicast", action="store_true", help="attach the multicast-capable secondary network")
+    c.add_argument("--device", action="append", metavar="RESOURCE=QTY",
+                   help="device-plugin resource, e.g. nvidia.com/gpu=1, smarter-devices/ttyUSB0=1, hugepages-2Mi=1Gi")
+    c.add_argument("--host-path", action="append", metavar="PATH", help="extra host path to mount (lab profiles only)")
+    c.add_argument("--cap", action="append", metavar="CAP", help="extra Linux capability (lab profiles only)")
+    c.add_argument("--expose", action="store_true", help="also publish sshd on a LoadBalancer Service")
+    c.add_argument("--idle-timeout", help="auto-stop after this much inactivity (e.g. 4h, 30m, off)")
+    c.add_argument("--tz", help="container timezone, e.g. America/Chicago")
+    c.add_argument("--allow-unknown-tools", action="store_true")
+    c.add_argument("--timeout", type=int, default=600, help="seconds to wait for readiness")
+    c.add_argument("--no-wait", action="store_true")
+    c.add_argument("--dry-run", action="store_true", help="print the manifests as YAML and exit")
+    c.add_argument("--offline", action="store_true", help="with --dry-run: never call kubectl (requires --namespace)")
+    c.add_argument("-y", "--yes", action="store_true")
+
+    l = add("list", cmd_list, "list workspaces")
+    l.add_argument("-A", "--all-namespaces", action="store_true")
+    s = add("status", cmd_status, "show a workspace"); s.add_argument("name")
+    st = add("start", cmd_start, "start a stopped workspace"); st.add_argument("name"); st.add_argument("--timeout", type=int, default=600)
+    sp = add("stop", cmd_stop, "stop a workspace (keeps the volume)"); sp.add_argument("name")
+    d = add("delete", cmd_delete, "delete a workspace"); d.add_argument("name")
+    d.add_argument("--purge", action="store_true", help="also delete the home volume"); d.add_argument("-y", "--yes", action="store_true")
+    sh_ = add("ssh", cmd_ssh, "ssh into a workspace (starts it if stopped)"); sh_.add_argument("name")
+    sh_.add_argument("command", nargs=argparse.REMAINDER, help="optional remote command")
+    co = add("code", cmd_code, "open VS Code on a workspace"); co.add_argument("name"); co.add_argument("path", nargs="?", default="/workspace")
+    pr = add("proxy", cmd_proxy, "ssh ProxyCommand helper (used by ~/.ssh/config)"); pr.add_argument("name"); pr.add_argument("--timeout", type=int, default=600)
+    pf = add("port-forward", cmd_port_forward, "forward ports via kubectl"); pf.add_argument("name"); pf.add_argument("ports", nargs="+"); pf.add_argument("--timeout", type=int, default=600)
+    lg = add("logs", cmd_logs, "boot/tool-install logs"); lg.add_argument("name"); lg.add_argument("-f", "--follow", action="store_true")
+    sc = add("ssh-config", cmd_ssh_config, "(re)write the ~/.ssh/config entry, e.g. on a second machine"); sc.add_argument("name"); sc.add_argument("--git-agent", action="store_true")
+    idl = add("idle", cmd_idle, "change the auto-stop timeout"); idl.add_argument("name"); idl.add_argument("duration", help="e.g. 8h, 30m, off")
+    ct = add("catalog", cmd_catalog, "show languages, tools and profiles"); ct.add_argument("--json", action="store_true")
+    cl = add("cluster", cmd_cluster, "which cluster kubectl points at: nodes, platform, workspace namespaces and pods")
+    cl.add_argument("--contexts", action="store_true", help="also list every kubeconfig context")
+    cl.add_argument("--mine", action="store_true", help="only my namespace(s)")
+    cl.add_argument("-A", "--all", action="store_true", help="also dump every pod on the cluster (kubectl get pods -A -o wide)")
+
+    nt = add("net", cmd_net, "DNS name, pod IP, peers in the same namespace and links of a workspace"); nt.add_argument("name")
+
+    dr = sub.add_parser("drives", help="home drives (the disk behind /home/dev) and shared drives", parents=[common])
+    dsub = dr.add_subparsers(dest="drives_cmd", required=True)
+    x = dsub.add_parser("list", help="my drives: attached, detached, shared", parents=[common]); x.set_defaults(func=cmd_drives_list)
+    x.add_argument("-A", "--all-namespaces", action="store_true")
+    x = dsub.add_parser("show", help="one drive and its snapshots", parents=[common]); x.set_defaults(func=cmd_drives_show); x.add_argument("drive")
+    x = dsub.add_parser("delete", help="delete a DETACHED drive for good", parents=[common]); x.set_defaults(func=cmd_drives_delete)
+    x.add_argument("drive"); x.add_argument("-y", "--yes", action="store_true")
+    x = dsub.add_parser("resize", help="grow a workspace's home drive (never shrinks)", parents=[common]); x.set_defaults(func=cmd_drives_resize)
+    x.add_argument("name", help="workspace name or drive (PVC) name"); x.add_argument("size", help="e.g. 100Gi")
+    x = dsub.add_parser("snapshot", help="take a VolumeSnapshot of a workspace's home drive", parents=[common]); x.set_defaults(func=cmd_drives_snapshot)
+    x.add_argument("name", help="workspace name or drive (PVC) name"); x.add_argument("--snapshot-name"); x.add_argument("--wait", action="store_true")
+    x = dsub.add_parser("snapshots", help="list snapshots", parents=[common]); x.set_defaults(func=cmd_drives_snapshots); x.add_argument("name", nargs="?")
+    x = dsub.add_parser("delete-snapshot", help="delete a snapshot", parents=[common]); x.set_defaults(func=cmd_drives_delete_snapshot); x.add_argument("snapshot")
+    x = dsub.add_parser("create-shared", help="create a shared (ReadWriteMany) drive to --mount in several workspaces", parents=[common])
+    x.set_defaults(func=cmd_drives_create_shared); x.add_argument("drive"); x.add_argument("--size", default="100Gi"); x.add_argument("--storage", help="a kind=shared storage choice")
+    x.add_argument("--dry-run", action="store_true"); x.add_argument("--offline", action="store_true")
+
+    shp = sub.add_parser("share", help="let another developer ssh into a workspace, or mount a shared drive", parents=[common])
+    ssub = shp.add_subparsers(dest="share_cmd", required=True)
+    x = ssub.add_parser("add", help="share a workspace: guest key into authorized_keys + RoleBinding for exec", parents=[common]); x.set_defaults(func=cmd_share_add)
+    x.add_argument("name"); x.add_argument("user", help="guest identity as the API server knows it (e.g. bob@corp.example)")
+    x.add_argument("--key", metavar="FILE", help="guest's SSH public key file (kubectl cannot read their profile; the portal can)")
+    x = ssub.add_parser("rm", help="revoke a guest", parents=[common]); x.set_defaults(func=cmd_share_rm); x.add_argument("name"); x.add_argument("user")
+    x = ssub.add_parser("list", help="guests of a workspace", parents=[common]); x.set_defaults(func=cmd_share_list); x.add_argument("name")
+    x = ssub.add_parser("drive", help="(portal/admin) share a shared drive with another developer: prints the manifests", parents=[common])
+    x.set_defaults(func=cmd_share_drive); x.add_argument("drive"); x.add_argument("user"); x.add_argument("--read-only", action="store_true"); x.add_argument("--apply", action="store_true")
+
+    lk = sub.add_parser("link", help="allow pod-to-pod traffic between my workspace and another developer's", parents=[common])
+    lsub = lk.add_subparsers(dest="link_cmd", required=True)
+    x = lsub.add_parser("add", help="NetworkPolicy peer-* in MY namespace (the peer must link back)", parents=[common]); x.set_defaults(func=cmd_link_add)
+    x.add_argument("name"); x.add_argument("--to", required=True, metavar="OWNER/WORKSPACE"); x.add_argument("--ports", help="comma-separated TCP ports (default: all)")
+    x = lsub.add_parser("rm", help="remove a link", parents=[common]); x.set_defaults(func=cmd_link_rm); x.add_argument("name"); x.add_argument("--to", required=True, metavar="OWNER/WORKSPACE")
+    x = lsub.add_parser("list", help="links of a workspace", parents=[common]); x.set_defaults(func=cmd_link_list); x.add_argument("name")
+
+    a = sub.add_parser("admin", help="platform-admin commands")
+    asub = a.add_subparsers(dest="admin_cmd", required=True)
+    pj = asub.add_parser("project", help="team project namespaces (a shared 'virtual namespace')")
+    pjs = pj.add_subparsers(dest="project_cmd", required=True)
+    x = pjs.add_parser("create", help="create/update ws-proj-NAME with members", parents=[common]); x.set_defaults(func=cmd_admin_project_create)
+    x.add_argument("name"); x.add_argument("--members", default="", help="comma-separated user identities (group:NAME for a group)"); x.add_argument("--groups", default="", help="comma-separated group names")
+    x.add_argument("--cpu", default="32"), x.add_argument("--memory", default="128Gi"), x.add_argument("--storage", default="1Ti")
+    x.add_argument("--lab", action="store_true", help="privileged project namespace (Pod Security privileged)")
+    x.add_argument("--dry-run", action="store_true"), x.add_argument("--offline", action="store_true")
+    x = pjs.add_parser("members", help="add/remove members: --add alice,group:team --remove bob", parents=[common]); x.set_defaults(func=cmd_admin_project_members)
+    x.add_argument("name"); x.add_argument("--add", default=""); x.add_argument("--remove", default="")
+    x = pjs.add_parser("list", help="list project namespaces", parents=[common]); x.set_defaults(func=cmd_admin_project_list)
+    x = pjs.add_parser("delete", help="delete a project namespace (drives inside are lost unless Retain)", parents=[common]); x.set_defaults(func=cmd_admin_project_delete)
+    x.add_argument("name"); x.add_argument("-y", "--yes", action="store_true")
+    ob = asub.add_parser("onboard", help="create a developer's namespaces, quota, RBAC and network policy", parents=[common])
+    ob.set_defaults(func=cmd_admin_onboard)
+    ob.add_argument("user", help="developer username as the API server sees it (e.g. alice or alice@corp.example)")
+    ob.add_argument("--subject", help="RBAC subject name if it differs from USER")
+    ob.add_argument("--group", action="store_true", help="USER is a group name")
+    ob.add_argument("--lab", action="store_true", help="also create the privileged ws-<user>-lab namespace")
+    ob.add_argument("--cpu", default="16"), ob.add_argument("--memory", default="64Gi"), ob.add_argument("--storage", default="500Gi")
+    ob.add_argument("--dry-run", action="store_true"), ob.add_argument("--offline", action="store_true", help="with --dry-run: skip API-server lookups")
+    rp = asub.add_parser("reap", help="stop idle workspaces (run by the CronJob)", parents=[common])
+    rp.set_defaults(func=cmd_admin_reap)
+    rp.add_argument("-A", "--all-namespaces", action="store_true"), rp.add_argument("--dry-run", action="store_true")
+    rp.add_argument("-v", "--verbose", action="store_true")
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    # `owner/name` refers to a workspace another developer shared with me: namespace ws-<owner>,
+    # ssh alias ws-<owner>-<name> (so it never collides with my own workspace of that name).
+    ref = getattr(args, "name", None)
+    if isinstance(ref, str) and "/" in ref and not getattr(args, "namespace", None):
+        owner_ns, short = split_ref(ref)
+        args.namespace, args.name, args.alias = owner_ns, short, f"{owner_ns}-{short}"
+    global CATALOG_FILE
+    CATALOG_FILE = getattr(args, "catalog", None) or os.environ.get("WORKSPACE_CATALOG") or None
+    try:
+        k = Kube(context=args.context, namespace=args.namespace, offline=bool(getattr(args, "offline", False)))
+        return int(args.func(args, k) or 0)
+    except CliError as e:
+        print(f"workspace: error: {e}", file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as e:
+        print(f"workspace: error: {' '.join(e.cmd)} failed: {(e.stderr or '').strip()}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

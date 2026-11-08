@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# configure-artifactory — point every package manager in the workspace at the
+# organisation's Artifactory remotes, so nothing is fetched from the public
+# internet. Runs as root at boot when ARTIFACTORY_URL is set. Inputs (env):
+#   ARTIFACTORY_URL    https://artifactory.example.com/artifactory
+#   ARTIFACTORY_REPOS  JSON {"apt":"ubuntu-remote","pypi":"pypi-remote","npm":"npm-remote",
+#                            "go":"go-remote","maven":"maven-remote","cargo":"cargo-remote","generic":"…"}
+#   ARTIFACTORY_TOKEN  optional identity/access token (from the workspace-profile Secret)
+# Everything lands in system-wide config (image filesystem) or is seeded once into
+# $HOME, so a developer can still override per project.
+set -Eeuo pipefail
+: "${ARTIFACTORY_URL:?ARTIFACTORY_URL not set}"
+repos=${ARTIFACTORY_REPOS:-{}}
+repo() { printf '%s' "$repos" | jq -r --arg k "$1" '.[$k] // empty'; }
+host=$(printf '%s' "$ARTIFACTORY_URL" | sed -E 's#^[a-z]+://##; s#/.*##')
+DEV_HOME=/home/dev
+log() { echo "[configure-artifactory] $*"; }
+
+# --- credentials: one netrc, read by curl, pip (requests), git, Go.
+if [ -n "${ARTIFACTORY_TOKEN:-}" ]; then
+  install -d -m 700 -o dev -g dev /run/workspace
+  printf 'machine %s\nlogin %s\npassword %s\n' "$host" "${ARTIFACTORY_USER:-token}" "$ARTIFACTORY_TOKEN" >/run/workspace/netrc
+  chown dev:dev /run/workspace/netrc && chmod 600 /run/workspace/netrc
+  echo 'export NETRC=/run/workspace/netrc CURL_HOME=/run/workspace' >/etc/profile.d/workspace-artifactory-auth.sh
+  printf 'netrc-file = /run/workspace/netrc\n' >/run/workspace/.curlrc
+fi
+
+# --- apt (Ubuntu remote)
+if r=$(repo apt) && [ -n "$r" ]; then
+  codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+  cat >/etc/apt/sources.list.d/ubuntu.sources <<EOF
+Types: deb
+URIs: $ARTIFACTORY_URL/$r
+Suites: $codename $codename-updates $codename-security $codename-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+  rm -f /etc/apt/sources.list /var/lib/workspace/apt-updated
+  if [ -n "${ARTIFACTORY_TOKEN:-}" ]; then
+    printf 'machine %s\nlogin %s\npassword %s\n' "$host" "${ARTIFACTORY_USER:-token}" "$ARTIFACTORY_TOKEN" >/etc/apt/auth.conf.d/artifactory.conf
+    chmod 600 /etc/apt/auth.conf.d/artifactory.conf
+  fi
+  log "apt → $r"
+fi
+
+# --- pip / uv (PyPI remote)
+if r=$(repo pypi) && [ -n "$r" ]; then
+  mkdir -p /etc
+  cat >/etc/pip.conf <<EOF
+[global]
+index-url = $ARTIFACTORY_URL/api/pypi/$r/simple
+trusted-host = $host
+EOF
+  echo "export UV_INDEX_URL=$ARTIFACTORY_URL/api/pypi/$r/simple PIP_INDEX_URL=$ARTIFACTORY_URL/api/pypi/$r/simple" >/etc/profile.d/workspace-artifactory-pypi.sh
+  log "pip/uv → $r"
+fi
+
+# --- npm / pnpm / yarn (npm remote)
+if r=$(repo npm) && [ -n "$r" ]; then
+  reg="$ARTIFACTORY_URL/api/npm/$r/"
+  { echo "registry=$reg"
+    [ -n "${ARTIFACTORY_TOKEN:-}" ] && echo "//${reg#https://}:_authToken=$ARTIFACTORY_TOKEN"; } >/usr/local/etc/npmrc 2>/dev/null || true
+  echo "export NPM_CONFIG_REGISTRY=$reg COREPACK_NPM_REGISTRY=${reg%/}" >/etc/profile.d/workspace-artifactory-npm.sh
+  log "npm → $r"
+fi
+
+# --- Go modules (Go remote) — GOPROXY honours netrc for auth
+if r=$(repo go) && [ -n "$r" ]; then
+  echo "export GOPROXY=$ARTIFACTORY_URL/api/go/$r GONOSUMCHECK=1 GONOSUMDB=* GOFLAGS=-mod=mod" >/etc/profile.d/workspace-artifactory-go.sh
+  log "go → $r"
+fi
+
+# --- Maven / Gradle (Maven remote), seeded into ~/.m2 once
+if r=$(repo maven) && [ -n "$r" ]; then
+  mkdir -p /opt/workspace/seed-files
+  cat >/opt/workspace/seed-files/maven-settings.xml <<EOF
+<settings>
+  <mirrors><mirror><id>artifactory</id><mirrorOf>*</mirrorOf><url>$ARTIFACTORY_URL/$r</url></mirror></mirrors>
+$( [ -n "${ARTIFACTORY_TOKEN:-}" ] && printf '  <servers><server><id>artifactory</id><username>%s</username><password>%s</password></server></servers>\n' "${ARTIFACTORY_USER:-token}" "$ARTIFACTORY_TOKEN" )
+</settings>
+EOF
+  if [ ! -e "$DEV_HOME/.m2/settings.xml" ]; then
+    install -d -o dev -g dev "$DEV_HOME/.m2"
+    install -m 600 -o dev -g dev /opt/workspace/seed-files/maven-settings.xml "$DEV_HOME/.m2/settings.xml"
+  fi
+  echo "export GRADLE_OPTS=\"-Dmaven.repo.remote=$ARTIFACTORY_URL/$r\"" >/etc/profile.d/workspace-artifactory-maven.sh
+  log "maven → $r (gradle: use the mirror in your init script, see docs)"
+fi
+
+# --- Cargo (crates remote, sparse protocol), seeded into ~/.cargo/config.toml once
+if r=$(repo cargo) && [ -n "$r" ]; then
+  if [ ! -e "$DEV_HOME/.cargo/config.toml" ]; then
+    install -d -o dev -g dev "$DEV_HOME/.cargo"
+    cat >"$DEV_HOME/.cargo/config.toml" <<EOF
+[source.crates-io]
+replace-with = "artifactory"
+[source.artifactory]
+registry = "sparse+$ARTIFACTORY_URL/api/cargo/$r/index/"
+[registries.artifactory]
+index = "sparse+$ARTIFACTORY_URL/api/cargo/$r/index/"
+[registry]
+global-credential-providers = ["cargo:token"]
+EOF
+    chown dev:dev "$DEV_HOME/.cargo/config.toml"
+  fi
+  [ -n "${ARTIFACTORY_TOKEN:-}" ] && echo "export CARGO_REGISTRIES_ARTIFACTORY_TOKEN=\"Bearer $ARTIFACTORY_TOKEN\"" >/etc/profile.d/workspace-artifactory-cargo.sh
+  log "cargo → $r"
+fi
+
+# --- rustup / go toolchain / node downloads (generic remote) — used by feature installers via lib.sh fetch()
+echo "export ARTIFACTORY_URL=$ARTIFACTORY_URL ARTIFACTORY_HOST=$host" >/etc/profile.d/workspace-artifactory.sh
+log "done"

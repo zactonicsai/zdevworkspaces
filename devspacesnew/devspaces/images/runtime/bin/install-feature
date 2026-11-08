@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# install-feature NAME — run one feature installer and record it as done.
+# Used by langs/Dockerfile at build time and by the entrypoint at boot (--tools).
+# Lookup order:
+#   /opt/workspace/features.d/NAME.sh       hot-added by admins via the optional
+#                                           `workspace-features` ConfigMap (no image rebuild)
+#   /opt/workspace/features/NAME/install.sh baked into the image
+set -Eeuo pipefail
+name=${1:?usage: install-feature NAME}
+STATE=/var/lib/workspace/features
+for s in "/opt/workspace/features.d/$name.sh" "/opt/workspace/features/$name/install.sh"; do
+  if [ -f "$s" ]; then
+    FEATURE_NAME="$name" FEATURE_DIR="$(dirname "$s")" bash "$s"
+    mkdir -p "$STATE" && date -u +%FT%TZ >"$STATE/$name.done"
+    exit 0
+  fi
+done
+echo "install-feature: no installer found for '$name'" >&2
+exit 1

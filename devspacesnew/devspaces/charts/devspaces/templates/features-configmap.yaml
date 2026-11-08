@@ -1,0 +1,13 @@
+# Hot-added tool installers, mounted read-only at /opt/workspace/features.d in every workspace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workspace-features
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: devspaces
+data:
+{{- range $name, $body := .Values.features }}
+  {{ $name }}: |
+{{ $body | indent 4 }}
+{{- end }}

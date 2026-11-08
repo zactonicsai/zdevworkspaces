@@ -1,0 +1,57 @@
+{
+ "user": {
+  "name": "demo@example.com",
+  "short": "demo",
+  "groups": [
+   "system:authenticated",
+   "developers"
+  ]
+ },
+ "namespace": "ws-demo",
+ "labNamespace": "ws-demo-lab",
+ "namespaces": [
+  {
+   "name": "ws-demo",
+   "tier": "standard",
+   "exists": true
+  },
+  {
+   "name": "ws-demo-lab",
+   "tier": "lab",
+   "exists": true
+  },
+  {
+   "name": "ws-proj-checkout",
+   "tier": "project",
+   "exists": true,
+   "project": "checkout"
+  }
+ ],
+ "projects": [
+  {
+   "name": "checkout",
+   "namespace": "ws-proj-checkout",
+   "members": [
+    "demo@example.com",
+    "bob@example.com"
+   ],
+   "groups": [],
+   "tier": "standard",
+   "mesh": "none"
+  }
+ ],
+ "auth": "stub",
+ "onboarded": true,
+ "canLab": true,
+ "catalogSource": "stub",
+ "artifactory": false,
+ "artifactoryUrl": "https://artifactory.example.com/artifactory",
+ "sharing": true,
+ "links": true,
+ "mesh": "none",
+ "version": "stub",
+ "mock": true,
+ "login": {
+  "mode": "stub"
+ }
+}

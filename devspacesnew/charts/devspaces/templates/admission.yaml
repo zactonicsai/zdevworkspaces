@@ -1,0 +1,170 @@
+# Generated-by-design from deploy/platform/* — keep both in sync (see charts/devspaces/README.md).
+{{- if .Values.admission.enabled }}
+# Guardrails that Pod Security Admission alone does not express. PSA gives us:
+#   standard namespaces → `baseline` (no privileged, no hostPath, no host namespaces,
+#                         no extra capabilities beyond the baseline set)
+#   lab namespaces      → `privileged` (anything goes — so we add rules here)
+# These ValidatingAdmissionPolicies (GA, admissionregistration.k8s.io/v1) apply
+# to every namespace carrying the devspaces.io/tenant label.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: devspaces-workspace-guardrails
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+        - { key: devspaces.io/tenant, operator: Exists }
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  variables:
+    - name: isLab
+      expression: "has(namespaceObject.metadata.labels) && 'devspaces.io/tier' in namespaceObject.metadata.labels && namespaceObject.metadata.labels['devspaces.io/tier'] == 'lab'"
+    - name: allContainers
+      expression: "object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers : []) + (has(object.spec.ephemeralContainers) ? object.spec.ephemeralContainers : [])"
+    - name: hostPaths
+      expression: "has(object.spec.volumes) ? object.spec.volumes.filter(v, has(v.hostPath)).map(v, v.hostPath.path) : []"
+    - name: allowedHostPathPrefixes
+      expression: "['/dev', '/sys', '/lib/modules', '/usr/src', '/lib/firmware', '/run/udev']"
+  validations:
+    # Host namespaces would let a workspace observe or disturb other pods on the node.
+    - expression: "!(has(object.spec.hostNetwork) && object.spec.hostNetwork) && !(has(object.spec.hostPID) && object.spec.hostPID) && !(has(object.spec.hostIPC) && object.spec.hostIPC)"
+      message: "workspaces may not use hostNetwork, hostPID or hostIPC (use a device plugin or SR-IOV instead)"
+    # Standard tier: real sandbox required — user namespace, gVisor or Kata.
+    - expression: "variables.isLab || (has(object.spec.hostUsers) && object.spec.hostUsers == false) || (has(object.spec.runtimeClassName) && object.spec.runtimeClassName in ['gvisor', 'kata'])"
+      message: "standard-tier workspaces must set hostUsers=false or run under the gvisor/kata RuntimeClass"
+    # Privileged only in lab namespaces (PSA enforces this too; belt and braces).
+    - expression: "variables.isLab || !variables.allContainers.exists(c, has(c.securityContext) && has(c.securityContext.privileged) && c.securityContext.privileged)"
+      message: "privileged containers are only allowed in *-lab namespaces (workspace create --profile hardware)"
+    # hostPath: never in standard tier; allow-listed prefixes in lab tier.
+    - expression: "variables.hostPaths.all(p, variables.isLab && variables.allowedHostPathPrefixes.exists(a, p == a || p.startsWith(a + '/')))"
+      message: "hostPath volumes must be under /dev, /sys, /lib/modules, /usr/src, /lib/firmware or /run/udev and only in lab namespaces"
+    # The kubelet/CRI sockets and the container runtime root are off limits even in the lab.
+    - expression: "!variables.hostPaths.exists(p, p.startsWith('/var/run') || p.startsWith('/run/containerd') || p.startsWith('/var/lib/kubelet') || p.startsWith('/etc/kubernetes'))"
+      message: "mounting runtime or kubelet state from the host is not allowed"
+    # Lab pods must stay on the lab pool (its taint keeps everyone else away).
+    - expression: "!variables.isLab || (has(object.spec.nodeSelector) && 'devspaces.io/lab' in object.spec.nodeSelector)"
+      message: "lab-tier workspaces must select the lab node pool (nodeSelector devspaces.io/lab=true)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: devspaces-workspace-guardrails
+spec:
+  policyName: devspaces-workspace-guardrails
+  validationActions: ["Deny", "Audit"]
+---
+# Developers are confined to their namespace by RBAC, but a NetworkPolicy "deny
+# all by default" posture also needs the CNI to enforce policy. This policy makes
+# the expectation explicit and fails loudly if someone disables enforcement:
+# every tenant namespace must keep its tenant-ingress / tenant-egress policies.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: devspaces-protect-tenant-policies
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+        - { key: devspaces.io/tenant, operator: Exists }
+    resourceRules:
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["DELETE", "UPDATE"]
+        resources: ["networkpolicies"]
+  validations:
+    # Add your GitOps controller's group (e.g. system:serviceaccounts:argocd) if it manages tenants.
+    - expression: "!(oldObject.metadata.name in ['tenant-ingress', 'tenant-egress']) || request.userInfo.groups.exists(g, g in {{ toJson .Values.admission.platformAdminGroups | replace "\"" "'" }})"
+      message: "the tenant-ingress/tenant-egress policies are managed by the platform (group devspaces:platform-admins)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: devspaces-protect-tenant-policies
+spec:
+  policyName: devspaces-protect-tenant-policies
+  validationActions: ["Deny"]
+{{- end }}
+{{- if .Values.storage.protectHomeDrives }}
+---
+# Home drives outlive pods and workspaces. The only way to delete one is on purpose:
+# the client first sets devspaces.io/allow-delete=true (what `delete --purge` and the
+# portal's "Delete drive for good" do), then deletes. Everything else — a mistyped
+# kubectl, a GitOps prune, an over-eager cleanup job — is rejected here.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: devspaces-protect-home-drives
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+        - { key: devspaces.io/tenant, operator: Exists }
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["persistentvolumeclaims"]
+  validations:
+    - expression: >-
+        !(has(oldObject.metadata.labels) && 'devspaces.io/drive' in oldObject.metadata.labels && oldObject.metadata.labels['devspaces.io/drive'] == 'home')
+        || (has(oldObject.metadata.annotations) && 'devspaces.io/allow-delete' in oldObject.metadata.annotations && oldObject.metadata.annotations['devspaces.io/allow-delete'] == 'true')
+      message: "this is a home drive (devspaces.io/drive=home); it survives workspace deletion on purpose. To really delete it: workspace delete NAME --purge, or annotate devspaces.io/allow-delete=true first"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: devspaces-protect-home-drives
+spec:
+  policyName: devspaces-protect-home-drives
+  validationActions: ["Deny"]
+{{- end }}
+{{- if .Values.portal.sharing }}
+---
+# The portal's sharing ServiceAccount may only create/delete objects with the sharing
+# name prefixes. RBAC cannot express "create with a name prefix", so this policy does.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: devspaces-portal-sharing-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["roles", "rolebindings"]
+      - apiGroups: ["networking.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "DELETE"]
+        resources: ["networkpolicies"]
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "DELETE"]
+        resources: ["persistentvolumes", "persistentvolumeclaims"]
+  matchConditions:
+    - name: onlyThePortalSA
+      expression: "request.userInfo.username == 'system:serviceaccount:{{ .Release.Namespace }}:workspace-portal'"
+  variables:
+    - name: name
+      expression: "request.operation == 'DELETE' ? oldObject.metadata.name : object.metadata.name"
+  validations:
+    - expression: "variables.name.startsWith('share-') || variables.name.startsWith('workspace-guest-') || variables.name.startsWith('peer-') || variables.name.startsWith('shared-')"
+      message: "the portal may only manage share-*, workspace-guest-*, peer-* and shared-* objects"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: devspaces-portal-sharing-scope
+spec:
+  policyName: devspaces-portal-sharing-scope
+  validationActions: ["Deny"]
+{{- end }}
