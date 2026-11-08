@@ -1,0 +1,166 @@
+# Rendered by:
+#   workspace --catalog deploy/platform/catalog.json admin project create checkout --members alice@corp.example,bob@corp.example,group:team-checkout --dry-run --offline
+# A project namespace: a team's "virtual namespace" — every member's workspaces live here, see each other and talk freely.
+---
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ws-proj-checkout
+  labels:
+    devspaces.io/tenant: proj-checkout
+    devspaces.io/tier: standard
+    app.kubernetes.io/managed-by: workspace-cli
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+    devspaces.io/kind: project
+    devspaces.io/project: checkout
+  annotations:
+    devspaces.io/members: "alice@corp.example,bob@corp.example"
+    devspaces.io/member-groups: team-checkout
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workspace-quota
+  namespace: ws-proj-checkout
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  hard:
+    requests.cpu: "32"
+    requests.memory: 128Gi
+    limits.memory: 128Gi
+    requests.storage: 1Ti
+    persistentvolumeclaims: "20"
+    pods: "20"
+    count/statefulsets.apps: "20"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: workspace-defaults
+  namespace: ws-proj-checkout
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  limits:
+  - type: Container
+    default:
+      cpu: "2"
+      memory: 4Gi
+      ephemeral-storage: 10Gi
+    defaultRequest:
+      cpu: 250m
+      memory: 512Mi
+      ephemeral-storage: 1Gi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: workspace
+  namespace: ws-proj-checkout
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workspace-heartbeat
+  namespace: ws-proj-checkout
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workspace-heartbeat
+  namespace: ws-proj-checkout
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+subjects:
+- kind: ServiceAccount
+  name: workspace
+  namespace: ws-proj-checkout
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workspace-heartbeat
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workspace-developer
+  namespace: ws-proj-checkout
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+subjects:
+- kind: User
+  name: alice@corp.example
+  apiGroup: rbac.authorization.k8s.io
+- kind: User
+  name: bob@corp.example
+  apiGroup: rbac.authorization.k8s.io
+- kind: Group
+  name: team-checkout
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workspace-developer
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-ingress
+  namespace: ws-proj-checkout
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tenant-egress
+  namespace: ws-proj-checkout
+  labels:
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector: {}
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.244.0.0/16
+        - 10.96.0.0/12
+        - 169.254.169.254/32

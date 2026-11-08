@@ -1,0 +1,273 @@
+# Rendered by:
+#   workspace --catalog deploy/platform/catalog.json create api --lang go --storage fast --from-snapshot ws-api-home-20261101 --mount shared:team-data --mount shared:bob/datasets --git-auth none --namespace ws-alice --dry-run --offline
+# Home drive created from a snapshot (dataSource), labelled as a drive with history annotations; two shared RWX drives mounted under /shared; retention policy keeps the drive.
+---
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ws-api-home
+  namespace: ws-alice
+  labels:
+    devspaces.io/workspace: api
+    devspaces.io/lang: go
+    devspaces.io/profile: standard
+    devspaces.io/tier: standard
+    app.kubernetes.io/managed-by: workspace-cli
+    devspaces.io/drive: home
+  annotations:
+    devspaces.io/last-workspace: api
+    devspaces.io/languages: go
+    devspaces.io/storage: fast
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 30Gi
+  dataSource:
+    apiGroup: snapshot.storage.k8s.io
+    kind: VolumeSnapshot
+    name: ws-api-home-20261101
+---
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+  name: ws-api-ssh
+  namespace: ws-alice
+  labels:
+    devspaces.io/workspace: api
+    devspaces.io/lang: go
+    devspaces.io/profile: standard
+    devspaces.io/tier: standard
+    app.kubernetes.io/managed-by: workspace-cli
+stringData:
+  authorized_keys: |
+    ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAOGp/Tlk4UWSvkQgnr1cXeziM6GDE7IgjlxEuk6AjKm workspace:ws-alice/api
+  ssh_host_ed25519_key: |
+    -----BEGIN OPENSSH PRIVATE KEY-----
+    (redacted)
+    -----END OPENSSH PRIVATE KEY-----
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ws-api
+  namespace: ws-alice
+  labels:
+    devspaces.io/workspace: api
+    devspaces.io/lang: go
+    devspaces.io/profile: standard
+    devspaces.io/tier: standard
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  clusterIP: None
+  selector:
+    devspaces.io/workspace: api
+  ports:
+  - name: ssh
+    port: 2222
+    targetPort: ssh
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ws-api
+  namespace: ws-alice
+  labels:
+    devspaces.io/workspace: api
+    devspaces.io/lang: go
+    devspaces.io/profile: standard
+    devspaces.io/tier: standard
+    app.kubernetes.io/managed-by: workspace-cli
+  annotations:
+    devspaces.io/idle-timeout: 4h
+    devspaces.io/spec: "{\"branch\": \"\", \"caps\": [], \"cpu\": \"4\", \"cpuRequest\": \"1\", \"createdAt\": \"2026-11-03T02:10:13Z\", \"devices\": {}, \"dotfiles\": \"\", \"drive\": \"ws-api-home\", \"ephemeralStorage\": \"20Gi\", \"expose\": false, \"fromSnapshot\": \"ws-api-home-20261101\", \"gitAuth\": \"none\", \"gitEmail\": \"\", \"gitName\": \"\", \"hostPaths\": [], \"idleTimeout\": \"4h\", \"image\": \"artifactory.example.com/devspaces-docker/workspace-go:2026.10\", \"isolation\": \"userns\", \"lang\": \"go\", \"languages\": [\"go\"], \"memory\": \"8Gi\", \"memoryRequest\": \"2Gi\", \"mounts\": [\"shared:team-data\", \"shared:bob/datasets\"], \"multicast\": false, \"profile\": \"standard\", \"repo\": \"\", \"size\": \"30Gi\", \"storage\": \"fast\", \"storageClass\": \"\", \"tools\": [], \"tz\": \"\"}"
+spec:
+  serviceName: ws-api
+  replicas: 1
+  selector:
+    matchLabels:
+      devspaces.io/workspace: api
+  updateStrategy:
+    type: RollingUpdate
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  template:
+    metadata:
+      labels:
+        devspaces.io/workspace: api
+        devspaces.io/lang: go
+        devspaces.io/profile: standard
+        devspaces.io/tier: standard
+        app.kubernetes.io/managed-by: workspace-cli
+    spec:
+      serviceAccountName: workspace
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+        sysctls:
+        - name: net.ipv4.ping_group_range
+          value: "0 2147483647"
+        - name: net.ipv4.ip_unprivileged_port_start
+          value: "0"
+      containers:
+      - name: workspace
+        image: "artifactory.example.com/devspaces-docker/workspace-go:2026.10"
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: WORKSPACE_NAME
+          value: api
+        - name: WORKSPACE_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: WORKSPACE_LANG
+          value: go
+        - name: WORKSPACE_LANGUAGES
+          value: go
+        - name: WORKSPACE_TOOLS
+          value: ""
+        - name: WORKSPACE_ARTIFACTS
+          value: "[]"
+        - name: WORKSPACE_PROFILE
+          value: standard
+        - name: WORKSPACE_REPO
+          value: ""
+        - name: WORKSPACE_REPO_DIR
+          value: ""
+        - name: WORKSPACE_BRANCH
+          value: ""
+        - name: WORKSPACE_DOTFILES
+          value: ""
+        - name: GIT_AUTH_MODE
+          value: none
+        - name: GIT_HOST
+          value: ""
+        - name: GIT_USER_NAME
+          value: ""
+        - name: GIT_USER_EMAIL
+          value: ""
+        - name: WORKSPACE_SSH_LISTEN
+          value: 127.0.0.1
+        - name: WORKSPACE_MCAST_IFACE
+          value: ""
+        - name: WORKSPACE_DNS
+          value: ws-api.ws-alice.svc.cluster.local
+        - name: WORKSPACE_MOUNTS
+          value: "/shared/team-data,/shared/datasets"
+        - name: TZ
+          value: UTC
+        - name: ARTIFACTORY_URL
+          value: "https://artifactory.example.com/artifactory"
+        - name: ARTIFACTORY_REPOS
+          value: "{\"apt\":\"ubuntu-remote\",\"cargo\":\"cargo-remote\",\"docker\":\"devspaces-docker\",\"generic\":\"devspaces-generic\",\"github\":\"github-remote\",\"go\":\"go-remote\",\"maven\":\"maven-remote\",\"npm\":\"npm-remote\",\"pypi\":\"pypi-remote\"}"
+        - name: ARTIFACTORY_MIRRORS
+          value: "{}"
+        - name: ARTIFACTORY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: workspace-profile
+              key: artifactory_token
+              optional: true
+        - name: ARTIFACTORY_USER
+          valueFrom:
+            secretKeyRef:
+              name: workspace-profile
+              key: artifactory_user
+              optional: true
+        ports:
+        - name: ssh
+          containerPort: 2222
+          protocol: TCP
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+            ephemeral-storage: 20Gi
+          limits:
+            cpu: "4"
+            memory: 8Gi
+            ephemeral-storage: 20Gi
+        securityContext:
+          runAsUser: 0
+          allowPrivilegeEscalation: true
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - AUDIT_WRITE
+            - CHOWN
+            - DAC_OVERRIDE
+            - FOWNER
+            - FSETID
+            - KILL
+            - MKNOD
+            - NET_BIND_SERVICE
+            - SETFCAP
+            - SETGID
+            - SETPCAP
+            - SETUID
+            - SYS_CHROOT
+        volumeMounts:
+        - name: home
+          mountPath: /home/dev
+        - name: ssh
+          mountPath: /etc/workspace/ssh
+          readOnly: true
+        - name: features-extra
+          mountPath: /opt/workspace/features.d
+          readOnly: true
+        - name: shared-0
+          mountPath: /shared/team-data
+        - name: shared-1
+          mountPath: /shared/datasets
+        readinessProbe:
+          exec:
+            command:
+            - bash
+            - "-c"
+            - "exec 3<>/dev/tcp/127.0.0.1/2222"
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          exec:
+            command:
+            - bash
+            - "-c"
+            - "exec 3<>/dev/tcp/127.0.0.1/2222"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          failureThreshold: 5
+      volumes:
+      - name: home
+        persistentVolumeClaim:
+          claimName: ws-api-home
+      - name: ssh
+        secret:
+          secretName: ws-api-ssh
+          defaultMode: 288
+      - name: features-extra
+        configMap:
+          name: workspace-features
+          optional: true
+          defaultMode: 493
+      - name: shared-0
+        persistentVolumeClaim:
+          claimName: shared-team-data
+      - name: shared-1
+        persistentVolumeClaim:
+          claimName: shared-bob-datasets
+      hostUsers: false
+      imagePullSecrets:
+      - name: artifactory-pull

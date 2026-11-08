@@ -1,0 +1,41 @@
+# deploy/phases/env.sh — the only file you edit. Copy: cp env.example env.sh
+# Every phase script reads this (and detected.env, written by 00-check.sh). Nothing else is shared.
+
+# ---- where ------------------------------------------------------------------------------------
+KUBE_CONTEXT=""                       # kubectl context; empty = whatever `kubectl config current-context` says
+SYSTEM_NS=devspaces-system            # namespace for the portal and the platform pieces
+
+# ---- images -----------------------------------------------------------------------------------
+REGISTRY=workspace/workspace-portal    # <REGISTRY>/workspace-portal, <REGISTRY>/workspace-dev:<TAG>  (images/build.sh --push)
+TAG=dev
+PULL_SECRET_DOCKERCONFIG=""           # base64 of ~/.docker/config.json if the registry is private; empty = public registry
+
+# ---- storage (leave empty to let 00-check.sh pick from what the cluster has) ------------------
+HOME_STORAGE_CLASS=""                 # RWO class for home drives. empty = 20-storage.sh clones the cluster default with reclaimPolicy Retain
+SHARED_STORAGE_CLASS=""               # RWX class for shared folders (nfs, azurefile, efs, cephfs…). empty = no "shared folder" choice
+SNAPSHOT_CLASS=""                     # VolumeSnapshotClass; empty = detect, or create one for the CSI driver if the snapshot CRDs exist
+
+# ---- sign-in ----------------------------------------------------------------------------------
+AUTH=dev                              # dev  = no login; every request is DEV_USER (try-out, one person, port-forward or IP-locked route)
+                                      # oidc = any OpenID Connect provider: Keycloak, Entra ID, Okta, Dex… browser PKCE + bearer tokens
+DEV_USER=you@example.com
+OIDC_ISSUER=""                        # oidc: https://keycloak.example.com/realms/devspaces  |  https://login.microsoftonline.com/<tenant>/v2.0
+OIDC_PORTAL_CLIENT_ID=devspaces-portal   # public client, PKCE, redirect <scheme>://<PORTAL_HOST>/*
+OIDC_CLI_CLIENT_ID=devspaces-cli         # public client with the device-authorization grant (wsctl login)
+OIDC_AUDIENCE=devspaces-api           # the `aud` the API requires
+OIDC_JWKS_URI=""                      # empty = read from <issuer>/.well-known/openid-configuration
+
+# ---- the route in (phase 40) ------------------------------------------------------------------
+EXPOSE=port-forward                   # port-forward = nothing public; 40-route.sh just prints the command
+                                      # ingress      = Kubernetes Ingress (INGRESS_CLASS, e.g. nginx, traefik, alb)
+                                      # istio        = Gateway + VirtualService on an existing Istio ingress gateway
+PORTAL_HOST=workspaces.example.com    # DNS name people type (ingress/istio)
+INGRESS_CLASS=""                      # empty = the cluster's default IngressClass (00-check.sh finds it)
+TLS_SECRET=""                         # TLS Secret for PORTAL_HOST (ingress: in SYSTEM_NS; istio: in the gateway namespace). empty = HTTP
+ALLOW_CIDRS=""                        # AUTH=dev + a public route is refused unless you list who may reach it: "203.0.113.7/32,10.0.0.0/8"
+
+# ---- people and pods (phases 50/60) -----------------------------------------------------------
+DEVELOPERS="alice@example.com bob@example.com"   # AUTH=dev: ignored, DEV_USER is onboarded
+PROJECTS=""                           # shared "virtual namespaces", e.g. "checkout payments" (members = all DEVELOPERS)
+SAMPLE_WORKSPACES="go:go web:node"    # name:language dev pods for the first developer; "" for none
+WORKSPACE_IDLE=4h                     # stop idle dev pods after this (drives are kept)

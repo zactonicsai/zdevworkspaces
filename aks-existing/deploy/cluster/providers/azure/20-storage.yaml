@@ -1,0 +1,85 @@
+# Storage for home drives and shared drives on AKS (contract C4). Applied by 20-storage.sh.
+#
+# Why three classes? A developer picks one per workspace (catalog `storage.choices`):
+#   workspace-home-premium   fast SSD disk for /home/dev — the default ("fast")
+#   workspace-home-standard  cheaper SSD disk for /home/dev ("standard")
+#   workspace-shared-files   Azure Files share that MANY pods can mount at once ("shared"):
+#                            team folders mounted under /shared/<name>, sharable with other developers
+# reclaimPolicy: Retain = when a PVC is deleted, the Azure disk/share is NOT deleted. An admin can
+# still hand it back (docs/azure-aks-setup.md Phase 4 "Recovering a retained disk").
+# allowVolumeExpansion: true = `wsctl drives resize` can grow a drive without copying.
+# volumeBindingMode: WaitForFirstConsumer = the disk is created in the zone of the node the pod lands on.
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: workspace-home-premium
+  labels: { app.kubernetes.io/part-of: devspaces, devspaces.io/storage: home }
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+    devspaces.io/description: "Premium SSD managed disk (ReadWriteOnce). Fast. Retained when the claim is deleted."
+provisioner: disk.csi.azure.com
+parameters:
+  skuName: Premium_LRS          # PremiumV2_LRS for very IO-heavy builds (needs zonal pools; no snapshots to blob)
+  cachingMode: ReadOnly
+  fsType: ext4                  # ext4/xfs: idmapped mounts for user namespaces (hostUsers: false)
+  tags: part-of=devspaces,kind=home-drive
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: workspace-home-standard
+  labels: { app.kubernetes.io/part-of: devspaces, devspaces.io/storage: home }
+  annotations:
+    devspaces.io/description: "Standard SSD managed disk (ReadWriteOnce). Cheaper; fine for editing and small builds."
+provisioner: disk.csi.azure.com
+parameters:
+  skuName: StandardSSD_LRS
+  cachingMode: ReadOnly
+  fsType: ext4
+  tags: part-of=devspaces,kind=home-drive
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: workspace-shared-files
+  labels: { app.kubernetes.io/part-of: devspaces, devspaces.io/storage: shared }
+  annotations:
+    devspaces.io/description: "Azure Files Premium share (ReadWriteMany). Mount the same folder in several workspaces, share it with teammates."
+provisioner: file.csi.azure.com
+parameters:
+  skuName: Premium_LRS
+  protocol: smb                 # nfs is faster for Linux-only use but needs a private endpoint + no SMB; see the guide
+  tags: part-of=devspaces,kind=shared-drive
+mountOptions:                   # files appear owned by the workspace user (uid/gid 1000 = dev)
+  - dir_mode=0775
+  - file_mode=0664
+  - uid=1000
+  - gid=1000
+  - mfsymlinks
+  - cache=strict
+  - nosharesock
+  - actimeo=30
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+---
+# Snapshots of home drives (wsctl drives snapshot …): incremental Azure disk snapshots.
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: csi-azuredisk-vsc
+  labels: { app.kubernetes.io/part-of: devspaces }
+  annotations:
+    snapshot.storage.kubernetes.io/is-default-class: "true"
+driver: disk.csi.azure.com
+deletionPolicy: Retain          # deleting the VolumeSnapshot object keeps the Azure snapshot for admins
+parameters:
+  incremental: "true"
+  tags: part-of=devspaces,kind=home-snapshot

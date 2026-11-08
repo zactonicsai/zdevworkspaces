@@ -1,0 +1,86 @@
+# Idle reaper: every 10 minutes, scale to zero any workspace whose last SSH /
+# editor activity (pod annotation devspaces.io/last-active, stamped by the
+# workspace heartbeat) is older than its devspaces.io/idle-timeout. Volumes are
+# untouched; the next `ssh` or `workspace start` scales it back up.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: workspace-reaper
+  namespace: devspaces-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workspace-reaper
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/scale"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: workspace-reaper
+subjects:
+  - kind: ServiceAccount
+    name: workspace-reaper
+    namespace: devspaces-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workspace-reaper
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: workspace-reaper
+  namespace: devspaces-system
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 540
+      template:
+        spec:
+          serviceAccountName: workspace-reaper
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: reaper
+              image:workspace/workspace-portal:dev-cli:2026.10
+              args: ["admin", "reap", "--all-namespaces", "--verbose"]
+              env:
+                - name: HOME
+                  value: /tmp
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits:   { cpu: 500m, memory: 256Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}

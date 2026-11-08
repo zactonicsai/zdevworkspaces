@@ -1,0 +1,276 @@
+# Rendered by:
+#   workspace --catalog deploy/platform/catalog.json create kmod --lang cpp --profile kernel --device vfio.io/pci-10de-2204=1 --git-auth none \
+#     --namespace ws-alice-lab --dry-run --offline
+# Lab tier in a Kata micro-VM: own guest kernel (safe to insmod/crash), PCI device passed through with VFIO.
+---
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ws-kmod-home
+  namespace: ws-alice-lab
+  labels:
+    devspaces.io/workspace: kmod
+    devspaces.io/lang: cpp
+    devspaces.io/profile: kernel
+    devspaces.io/tier: lab
+    app.kubernetes.io/managed-by: workspace-cli
+    devspaces.io/drive: home
+  annotations:
+    devspaces.io/last-workspace: kmod
+    devspaces.io/languages: cpp
+    devspaces.io/storage: fast
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+  name: ws-kmod-ssh
+  namespace: ws-alice-lab
+  labels:
+    devspaces.io/workspace: kmod
+    devspaces.io/lang: cpp
+    devspaces.io/profile: kernel
+    devspaces.io/tier: lab
+    app.kubernetes.io/managed-by: workspace-cli
+stringData:
+  authorized_keys: |
+    ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMWBcYv0URilH8+en5UHjsgnRD0gk/7QOR3DqIsdRTmX workspace:ws-alice-lab/kmod
+  ssh_host_ed25519_key: |
+    -----BEGIN OPENSSH PRIVATE KEY-----
+    (redacted)
+    -----END OPENSSH PRIVATE KEY-----
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ws-kmod
+  namespace: ws-alice-lab
+  labels:
+    devspaces.io/workspace: kmod
+    devspaces.io/lang: cpp
+    devspaces.io/profile: kernel
+    devspaces.io/tier: lab
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  clusterIP: None
+  selector:
+    devspaces.io/workspace: kmod
+  ports:
+  - name: ssh
+    port: 2222
+    targetPort: ssh
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ws-kmod
+  namespace: ws-alice-lab
+  labels:
+    devspaces.io/workspace: kmod
+    devspaces.io/lang: cpp
+    devspaces.io/profile: kernel
+    devspaces.io/tier: lab
+    app.kubernetes.io/managed-by: workspace-cli
+  annotations:
+    devspaces.io/idle-timeout: 4h
+    devspaces.io/spec: "{\"branch\": \"\", \"caps\": [], \"cpu\": \"4\", \"cpuRequest\": \"1\", \"createdAt\": \"2026-11-03T02:10:12Z\", \"devices\": {\"vfio.io/pci-10de-2204\": \"1\"}, \"dotfiles\": \"\", \"drive\": \"ws-kmod-home\", \"ephemeralStorage\": \"20Gi\", \"expose\": false, \"fromSnapshot\": \"\", \"gitAuth\": \"none\", \"gitEmail\": \"\", \"gitName\": \"\", \"hostPaths\": [], \"idleTimeout\": \"4h\", \"image\": \"artifactory.example.com/devspaces-docker/workspace-cpp:2026.10\", \"isolation\": \"kata\", \"lang\": \"cpp\", \"languages\": [\"cpp\"], \"memory\": \"8Gi\", \"memoryRequest\": \"2Gi\", \"mounts\": [], \"multicast\": false, \"profile\": \"kernel\", \"repo\": \"\", \"size\": \"30Gi\", \"storage\": \"fast\", \"storageClass\": \"\", \"tools\": [], \"tz\": \"\"}"
+spec:
+  serviceName: ws-kmod
+  replicas: 1
+  selector:
+    matchLabels:
+      devspaces.io/workspace: kmod
+  updateStrategy:
+    type: RollingUpdate
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  template:
+    metadata:
+      labels:
+        devspaces.io/workspace: kmod
+        devspaces.io/lang: cpp
+        devspaces.io/profile: kernel
+        devspaces.io/tier: lab
+        app.kubernetes.io/managed-by: workspace-cli
+    spec:
+      serviceAccountName: workspace
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+        sysctls:
+        - name: net.ipv4.ping_group_range
+          value: "0 2147483647"
+        - name: net.ipv4.ip_unprivileged_port_start
+          value: "0"
+      containers:
+      - name: workspace
+        image: "artifactory.example.com/devspaces-docker/workspace-cpp:2026.10"
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: WORKSPACE_NAME
+          value: kmod
+        - name: WORKSPACE_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: WORKSPACE_LANG
+          value: cpp
+        - name: WORKSPACE_LANGUAGES
+          value: cpp
+        - name: WORKSPACE_TOOLS
+          value: ""
+        - name: WORKSPACE_ARTIFACTS
+          value: "[]"
+        - name: WORKSPACE_PROFILE
+          value: kernel
+        - name: WORKSPACE_REPO
+          value: ""
+        - name: WORKSPACE_REPO_DIR
+          value: ""
+        - name: WORKSPACE_BRANCH
+          value: ""
+        - name: WORKSPACE_DOTFILES
+          value: ""
+        - name: GIT_AUTH_MODE
+          value: none
+        - name: GIT_HOST
+          value: ""
+        - name: GIT_USER_NAME
+          value: ""
+        - name: GIT_USER_EMAIL
+          value: ""
+        - name: WORKSPACE_SSH_LISTEN
+          value: 127.0.0.1
+        - name: WORKSPACE_MCAST_IFACE
+          value: ""
+        - name: WORKSPACE_DNS
+          value: ws-kmod.ws-alice-lab.svc.cluster.local
+        - name: WORKSPACE_MOUNTS
+          value: ""
+        - name: TZ
+          value: UTC
+        - name: ARTIFACTORY_URL
+          value: "https://artifactory.example.com/artifactory"
+        - name: ARTIFACTORY_REPOS
+          value: "{\"apt\":\"ubuntu-remote\",\"cargo\":\"cargo-remote\",\"docker\":\"devspaces-docker\",\"generic\":\"devspaces-generic\",\"github\":\"github-remote\",\"go\":\"go-remote\",\"maven\":\"maven-remote\",\"npm\":\"npm-remote\",\"pypi\":\"pypi-remote\"}"
+        - name: ARTIFACTORY_MIRRORS
+          value: "{}"
+        - name: ARTIFACTORY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: workspace-profile
+              key: artifactory_token
+              optional: true
+        - name: ARTIFACTORY_USER
+          valueFrom:
+            secretKeyRef:
+              name: workspace-profile
+              key: artifactory_user
+              optional: true
+        ports:
+        - name: ssh
+          containerPort: 2222
+          protocol: TCP
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+            ephemeral-storage: 20Gi
+            vfio.io/pci-10de-2204: "1"
+          limits:
+            cpu: "4"
+            memory: 8Gi
+            ephemeral-storage: 20Gi
+            vfio.io/pci-10de-2204: "1"
+        securityContext:
+          runAsUser: 0
+          allowPrivilegeEscalation: true
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - AUDIT_WRITE
+            - CHOWN
+            - DAC_OVERRIDE
+            - FOWNER
+            - FSETID
+            - IPC_LOCK
+            - KILL
+            - MKNOD
+            - NET_ADMIN
+            - NET_BIND_SERVICE
+            - NET_RAW
+            - SETFCAP
+            - SETGID
+            - SETPCAP
+            - SETUID
+            - SYS_ADMIN
+            - SYS_CHROOT
+            - SYS_MODULE
+            - SYS_PTRACE
+            - SYS_RAWIO
+        volumeMounts:
+        - name: home
+          mountPath: /home/dev
+        - name: ssh
+          mountPath: /etc/workspace/ssh
+          readOnly: true
+        - name: features-extra
+          mountPath: /opt/workspace/features.d
+          readOnly: true
+        readinessProbe:
+          exec:
+            command:
+            - bash
+            - "-c"
+            - "exec 3<>/dev/tcp/127.0.0.1/2222"
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          exec:
+            command:
+            - bash
+            - "-c"
+            - "exec 3<>/dev/tcp/127.0.0.1/2222"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          failureThreshold: 5
+      volumes:
+      - name: home
+        persistentVolumeClaim:
+          claimName: ws-kmod-home
+      - name: ssh
+        secret:
+          secretName: ws-kmod-ssh
+          defaultMode: 288
+      - name: features-extra
+        configMap:
+          name: workspace-features
+          optional: true
+          defaultMode: 493
+      runtimeClassName: kata
+      nodeSelector:
+        devspaces.io/lab: "true"
+      tolerations:
+      - key: devspaces.io/lab
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      imagePullSecrets:
+      - name: artifactory-pull

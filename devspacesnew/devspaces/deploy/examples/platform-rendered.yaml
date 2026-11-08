@@ -1,0 +1,1407 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+  name: devspaces-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: workspace-reaper
+  namespace: devspaces-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workspace-catalog-reader
+  namespace: devspaces-system
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - workspace-catalog
+  - workspace-features
+  resources:
+  - configmaps
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workspace-admin
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  - resourcequotas
+  - limitranges
+  - serviceaccounts
+  - secrets
+  verbs:
+  - get
+  - list
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - roles
+  - rolebindings
+  verbs:
+  - get
+  - list
+  - create
+  - update
+  - patch
+  - delete
+  - bind
+  - escalate
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - get
+  - list
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - endpoints
+  - configmaps
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  - statefulsets/scale
+  verbs:
+  - get
+  - list
+  - update
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workspace-developer
+rules:
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  - statefulsets/scale
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - pods/log
+  - pods/status
+  verbs:
+  - get
+  - list
+  - watch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  - pods/portforward
+  verbs:
+  - create
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - services
+  - secrets
+  - persistentvolumeclaims
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - get
+  - list
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - resourcequotas
+  - limitranges
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - snapshot.storage.k8s.io
+  resources:
+  - volumesnapshots
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - delete
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  verbs:
+  - get
+  - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workspace-namespace-viewer
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workspace-reaper
+rules:
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets/scale
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workspace-catalog-reader
+  namespace: devspaces-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workspace-catalog-reader
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:authenticated
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: workspace-namespace-viewer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workspace-namespace-viewer
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:authenticated
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: workspace-reaper
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workspace-reaper
+subjects:
+- kind: ServiceAccount
+  name: workspace-reaper
+  namespace: devspaces-system
+---
+apiVersion: v1
+data:
+  kernel-headers.sh: |
+    # Needed for out-of-tree module builds in the hardware profile.
+    apt-get install -y "linux-headers-$(uname -r)"   # or dnf install kernel-devel-$(uname -r)
+  labels-and-taints.sh: |
+    kubectl label node "$NODE" devspaces.io/lab=true
+    kubectl taint node "$NODE" devspaces.io/lab=true:NoSchedule
+  nvidia.md: |
+    GPUs: install the NVIDIA GPU Operator (or k8s-device-plugin) with a nodeSelector
+    of devspaces.io/lab=true and the lab toleration; workspaces request
+    `--device nvidia.com/gpu=1`. For CUDA *driver* development use the hardware
+    profile with --host-path /dev --host-path /sys and no device plugin.
+  vfio.sh: |
+    # Bind a PCI function to vfio-pci so it can be handed to a Kata (kernel profile) workspace.
+    modprobe vfio-pci
+    echo "0000:03:00.0" > /sys/bus/pci/devices/0000:03:00.0/driver/unbind || true
+    echo "vfio-pci" > /sys/bus/pci/devices/0000:03:00.0/driver_override
+    echo "0000:03:00.0" > /sys/bus/pci/drivers_probe
+kind: ConfigMap
+metadata:
+  name: lab-node-prep
+  namespace: devspaces-system
+---
+apiVersion: v1
+data:
+  99-devspaces-multicast.conf: |
+    # /etc/sysctl.d/99-devspaces-multicast.conf
+    net.ipv4.conf.all.rp_filter = 0
+    net.ipv4.conf.default.rp_filter = 0
+    net.ipv4.igmp_max_memberships = 1024
+    net.core.rmem_max = 26214400
+    net.core.wmem_max = 26214400
+  cilium-alternative.md: |
+    If the cluster runs Cilium ≥ 1.16 in VXLAN mode you can instead enable its
+    eBPF multicast datapath (beta) and skip Multus:
+        cilium config set multicast-enabled true
+        # per node: cilium-dbg bpf multicast group add 239.255.0.0/16 ... and
+        # subscriber add <group> <pod-ip>   (Isovalent Enterprise automates this
+        # with the IsovalentMulticastGroup CRD)
+    Groups and subscribers are then programmed per pod IP, so pair it with a small
+    controller or the `workspace` CLI hook of your choice. The NAD approach above
+    is CNI-agnostic and needs no per-pod programming, which is why it is the default.
+  kubelet-config-snippet.yaml: |
+    # Only needed for lab profiles that set pod-level sysctls; the multicast
+    # NAD itself needs nothing here (its tuning plugin acts inside the pod netns).
+    apiVersion: kubelet.config.k8s.io/v1beta1
+    kind: KubeletConfiguration
+    allowedUnsafeSysctls:
+      - "net.*"
+  promisc.sh: |
+    # macvlan bridge mode needs the master NIC to accept multicast for all child MACs.
+    ip link set dev eth0 allmulticast on
+kind: ConfigMap
+metadata:
+  name: multicast-node-prep
+  namespace: devspaces-system
+---
+apiVersion: v1
+data:
+  note: |
+    Pass `--global-namespaces=devspaces-system` to the Multus daemonset (thin plugin)
+    or set "globalNamespaces": "devspaces-system" in the thick-plugin daemon config.
+kind: ConfigMap
+metadata:
+  name: multus-global-namespaces
+  namespace: devspaces-system
+---
+apiVersion: v1
+data:
+  conf.yaml: |
+    - devicematch: ^ttyUSB[0-9]*$
+      nummaxdevices: 1
+    - devicematch: ^ttyACM[0-9]*$
+      nummaxdevices: 1
+    - devicematch: ^i2c-[0-9]*$
+      nummaxdevices: 1
+    - devicematch: ^spidev[0-9]\.[0-9]$
+      nummaxdevices: 1
+    - devicematch: ^video[0-9]*$
+      nummaxdevices: 1
+    - devicematch: ^gpiochip[0-9]*$
+      nummaxdevices: 1
+    - devicematch: ^uinput$
+      nummaxdevices: 4
+    - devicematch: ^kvm$
+      nummaxdevices: 8
+    - devicematch: ^fuse$
+      nummaxdevices: 20
+kind: ConfigMap
+metadata:
+  name: smarter-device-manager
+  namespace: devspaces-system
+---
+apiVersion: v1
+data:
+  catalog.json: |
+    {
+      "$comment": "Source of truth for what developers may build, shared by the CLI and the web portal. kustomize publishes it as ConfigMap devspaces-system/workspace-catalog. Admins add a language or tool here (plus images/features/<name>/install.sh, or just an `artifact` block for something downloadable from Artifactory) \u2014 no CLI/portal release needed.",
+      "registry": "artifactory.example.com/devspaces-docker",
+      "tag": "2026.10",
+      "pullSecret": "artifactory-pull",
+      "artifactory": {
+        "$comment": "Everything a workspace downloads comes from here. `url` is the Artifactory base (\u2026/artifactory). Repos are names of remote/virtual repositories you create; leave one empty to skip configuring that package manager. The portal lists images and tool versions through the Artifactory REST API; workspaces pull packages through these repos (configure-artifactory at boot).",
+        "url": "https://artifactory.example.com/artifactory",
+        "repos": {
+          "docker": "devspaces-docker",
+          "generic": "devspaces-generic",
+          "github": "github-remote",
+          "apt": "ubuntu-remote",
+          "pypi": "pypi-remote",
+          "npm": "npm-remote",
+          "go": "go-remote",
+          "maven": "maven-remote",
+          "cargo": "cargo-remote"
+        },
+        "docs": "https://jfrog.com/help/r/jfrog-artifactory-documentation"
+      },
+      "defaults": {
+        "profile": "standard",
+        "isolation": "userns",
+        "cpu": "4",
+        "memory": "8Gi",
+        "cpuRequest": "1",
+        "memoryRequest": "2Gi",
+        "ephemeralStorage": "20Gi",
+        "size": "30Gi",
+        "storageClass": "",
+        "idleTimeout": "4h"
+      },
+      "languages": {
+        "base": {
+          "image": "workspace-base",
+          "label": "No language (bare Linux)",
+          "description": "Ubuntu 24.04 with compilers, git and ssh \u2014 add languages as tools",
+          "docs": "https://ubuntu.com/server/docs"
+        },
+        "python": {
+          "image": "workspace-python",
+          "label": "Python",
+          "description": "Python 3 with pip, venv, pipx and uv",
+          "docs": "https://docs.python.org/3/",
+          "learn": "https://docs.python.org/3/tutorial/"
+        },
+        "go": {
+          "image": "workspace-go",
+          "label": "Go",
+          "description": "Go toolchain (latest stable) with module cache on your volume",
+          "docs": "https://go.dev/doc/",
+          "learn": "https://go.dev/tour/"
+        },
+        "rust": {
+          "image": "workspace-rust",
+          "label": "Rust",
+          "description": "Rust stable via rustup, cargo, clippy, rust-analyzer",
+          "docs": "https://doc.rust-lang.org/",
+          "learn": "https://doc.rust-lang.org/book/"
+        },
+        "java": {
+          "image": "workspace-java",
+          "label": "Java",
+          "description": "OpenJDK 21 with Maven and Gradle",
+          "docs": "https://docs.oracle.com/en/java/javase/21/",
+          "learn": "https://dev.java/learn/"
+        },
+        "node": {
+          "image": "workspace-node",
+          "label": "Node.js",
+          "description": "Node.js LTS with npm, pnpm and yarn (corepack)",
+          "docs": "https://nodejs.org/docs/latest/api/",
+          "learn": "https://nodejs.org/en/learn"
+        },
+        "cpp": {
+          "image": "workspace-cpp",
+          "label": "C / C++",
+          "description": "GCC and Clang, CMake, Ninja, GDB, Valgrind, clangd",
+          "docs": "https://en.cppreference.com/",
+          "learn": "https://isocpp.org/get-started"
+        }
+      },
+      "tools": {
+        "git": {
+          "builtin": true,
+          "category": "source control",
+          "description": "git + git-lfs (always present)",
+          "docs": "https://git-scm.com/doc"
+        },
+        "cmake": {
+          "category": "build",
+          "description": "CMake + Ninja build system",
+          "docs": "https://cmake.org/documentation/"
+        },
+        "gdb": {
+          "category": "debug",
+          "description": "gdb, lldb, strace, ltrace, valgrind",
+          "docs": "https://sourceware.org/gdb/documentation/"
+        },
+        "docker-cli": {
+          "category": "containers",
+          "description": "docker CLI + buildx + compose (daemon: DOCKER_HOST or a lab-tier dind sidecar)",
+          "docs": "https://docs.docker.com/reference/cli/docker/"
+        },
+        "kubectl": {
+          "category": "kubernetes",
+          "description": "kubectl + helm",
+          "docs": "https://kubernetes.io/docs/reference/kubectl/"
+        },
+        "protobuf": {
+          "category": "build",
+          "description": "protoc + gRPC plugins",
+          "docs": "https://protobuf.dev/"
+        },
+        "mcast": {
+          "category": "networking",
+          "description": "multicast test kit: iperf, smcroute, tcpdump, socat, mcast-check",
+          "docs": "https://www.rfc-editor.org/rfc/rfc1112"
+        },
+        "python": {
+          "category": "language",
+          "description": "add Python 3 to a workspace built from another language image",
+          "docs": "https://docs.python.org/3/"
+        },
+        "go": {
+          "category": "language",
+          "description": "add Go",
+          "docs": "https://go.dev/doc/"
+        },
+        "rust": {
+          "category": "language",
+          "description": "add Rust",
+          "docs": "https://doc.rust-lang.org/"
+        },
+        "node": {
+          "category": "language",
+          "description": "add Node.js",
+          "docs": "https://nodejs.org/docs/latest/api/"
+        },
+        "java": {
+          "category": "language",
+          "description": "add OpenJDK, Maven and Gradle",
+          "docs": "https://dev.java/"
+        },
+        "cpp": {
+          "category": "language",
+          "description": "add the C/C++ toolchain",
+          "docs": "https://gcc.gnu.org/onlinedocs/"
+        },
+        "ripgrep": {
+          "category": "shell",
+          "description": "rg \u2014 very fast text search across a repo",
+          "docs": "https://github.com/BurntSushi/ripgrep#readme",
+          "artifact": {
+            "repo": "github",
+            "path": "BurntSushi/ripgrep/releases/download/{version}/ripgrep-{version}-{triple}.tar.gz",
+            "version": "14.1.1",
+            "install": "tar",
+            "strip": 1,
+            "bin": [
+              "rg"
+            ]
+          }
+        },
+        "fd": {
+          "category": "shell",
+          "description": "fd \u2014 friendly alternative to find",
+          "docs": "https://github.com/sharkdp/fd#readme",
+          "artifact": {
+            "repo": "github",
+            "path": "sharkdp/fd/releases/download/v{version}/fd-v{version}-{triple}.tar.gz",
+            "version": "10.2.0",
+            "install": "tar",
+            "strip": 1,
+            "bin": [
+              "fd"
+            ]
+          }
+        },
+        "bat": {
+          "category": "shell",
+          "description": "bat \u2014 cat with syntax highlighting",
+          "docs": "https://github.com/sharkdp/bat#readme",
+          "artifact": {
+            "repo": "github",
+            "path": "sharkdp/bat/releases/download/v{version}/bat-v{version}-{triple}.tar.gz",
+            "version": "0.25.0",
+            "install": "tar",
+            "strip": 1,
+            "bin": [
+              "bat"
+            ]
+          }
+        },
+        "fzf": {
+          "category": "shell",
+          "description": "fzf \u2014 fuzzy finder for the terminal",
+          "docs": "https://github.com/junegunn/fzf#readme",
+          "artifact": {
+            "repo": "github",
+            "path": "junegunn/fzf/releases/download/v{version}/fzf-{version}-linux_{goarch}.tar.gz",
+            "version": "0.60.3",
+            "install": "tar",
+            "bin": [
+              "fzf"
+            ]
+          }
+        },
+        "yq": {
+          "category": "shell",
+          "description": "yq \u2014 jq for YAML",
+          "docs": "https://mikefarah.gitbook.io/yq",
+          "artifact": {
+            "repo": "github",
+            "path": "mikefarah/yq/releases/download/v{version}/yq_linux_{goarch}",
+            "version": "4.45.1",
+            "install": "binary",
+            "bin": [
+              "yq"
+            ]
+          }
+        },
+        "gh": {
+          "category": "source control",
+          "description": "GitHub CLI \u2014 pull requests and issues from the terminal",
+          "docs": "https://cli.github.com/manual/",
+          "artifact": {
+            "repo": "github",
+            "path": "cli/cli/releases/download/v{version}/gh_{version}_linux_{goarch}.tar.gz",
+            "version": "2.74.0",
+            "install": "tar",
+            "strip": 1,
+            "bin": [
+              "bin/gh"
+            ]
+          }
+        },
+        "lazygit": {
+          "category": "source control",
+          "description": "lazygit \u2014 terminal UI for git",
+          "docs": "https://github.com/jesseduffield/lazygit#readme",
+          "artifact": {
+            "repo": "github",
+            "path": "jesseduffield/lazygit/releases/download/v{version}/lazygit_{version}_Linux_{arch_alt}.tar.gz",
+            "version": "0.50.0",
+            "install": "tar",
+            "bin": [
+              "lazygit"
+            ]
+          }
+        },
+        "delta": {
+          "category": "source control",
+          "description": "delta \u2014 readable git diffs",
+          "docs": "https://dandavison.github.io/delta/",
+          "artifact": {
+            "repo": "github",
+            "path": "dandavison/delta/releases/download/{version}/delta-{version}-{triple}.tar.gz",
+            "version": "0.18.2",
+            "install": "tar",
+            "strip": 1,
+            "bin": [
+              "delta"
+            ]
+          }
+        },
+        "shellcheck": {
+          "category": "quality",
+          "description": "ShellCheck \u2014 finds bugs in shell scripts",
+          "docs": "https://www.shellcheck.net/wiki/",
+          "artifact": {
+            "repo": "github",
+            "path": "koalaman/shellcheck/releases/download/v{version}/shellcheck-v{version}.linux.{arch}.tar.xz",
+            "version": "0.10.0",
+            "install": "tar",
+            "strip": 1,
+            "bin": [
+              "shellcheck"
+            ]
+          }
+        },
+        "hadolint": {
+          "category": "quality",
+          "description": "hadolint \u2014 Dockerfile linter",
+          "docs": "https://github.com/hadolint/hadolint#readme",
+          "artifact": {
+            "repo": "github",
+            "path": "hadolint/hadolint/releases/download/v{version}/hadolint-Linux-{arch_alt}",
+            "version": "2.12.0",
+            "install": "binary",
+            "bin": [
+              "hadolint"
+            ]
+          }
+        },
+        "golangci-lint": {
+          "category": "quality",
+          "description": "golangci-lint \u2014 Go linters runner",
+          "docs": "https://golangci-lint.run/",
+          "artifact": {
+            "repo": "github",
+            "path": "golangci/golangci-lint/releases/download/v{version}/golangci-lint-{version}-linux-{goarch}.tar.gz",
+            "version": "2.1.6",
+            "install": "tar",
+            "strip": 1,
+            "bin": [
+              "golangci-lint"
+            ]
+          }
+        },
+        "buf": {
+          "category": "build",
+          "description": "buf \u2014 modern protobuf tooling",
+          "docs": "https://buf.build/docs/",
+          "artifact": {
+            "repo": "github",
+            "path": "bufbuild/buf/releases/download/v{version}/buf-Linux-{arch}",
+            "version": "1.54.0",
+            "install": "binary",
+            "bin": [
+              "buf"
+            ]
+          }
+        },
+        "just": {
+          "category": "build",
+          "description": "just \u2014 a command runner (like make, simpler)",
+          "docs": "https://just.systems/man/en/",
+          "artifact": {
+            "repo": "github",
+            "path": "casey/just/releases/download/{version}/just-{version}-{triple}.tar.gz",
+            "version": "1.40.0",
+            "install": "tar",
+            "bin": [
+              "just"
+            ]
+          }
+        },
+        "hyperfine": {
+          "category": "debug",
+          "description": "hyperfine \u2014 command-line benchmarking",
+          "docs": "https://github.com/sharkdp/hyperfine#readme",
+          "artifact": {
+            "repo": "github",
+            "path": "sharkdp/hyperfine/releases/download/v{version}/hyperfine-v{version}-{triple}.tar.gz",
+            "version": "1.19.0",
+            "install": "tar",
+            "strip": 1,
+            "bin": [
+              "hyperfine"
+            ]
+          }
+        },
+        "kubectx": {
+          "category": "kubernetes",
+          "description": "kubectx + kubens \u2014 switch clusters and namespaces quickly",
+          "docs": "https://github.com/ahmetb/kubectx#readme",
+          "artifact": {
+            "repo": "github",
+            "path": "ahmetb/kubectx/releases/download/v{version}/kubectx_v{version}_linux_{arch_alt}.tar.gz",
+            "version": "0.9.5",
+            "install": "tar",
+            "bin": [
+              "kubectx"
+            ]
+          }
+        },
+        "kubens": {
+          "category": "kubernetes",
+          "description": "kubens \u2014 switch the current namespace",
+          "docs": "https://github.com/ahmetb/kubectx#readme",
+          "artifact": {
+            "repo": "github",
+            "path": "ahmetb/kubectx/releases/download/v{version}/kubens_v{version}_linux_{arch_alt}.tar.gz",
+            "version": "0.9.5",
+            "install": "tar",
+            "bin": [
+              "kubens"
+            ]
+          }
+        },
+        "stern": {
+          "category": "kubernetes",
+          "description": "stern \u2014 tail logs from many pods at once",
+          "docs": "https://github.com/stern/stern#readme",
+          "artifact": {
+            "repo": "github",
+            "path": "stern/stern/releases/download/v{version}/stern_{version}_linux_{goarch}.tar.gz",
+            "version": "1.32.0",
+            "install": "tar",
+            "bin": [
+              "stern"
+            ]
+          }
+        },
+        "kubecolor": {
+          "category": "kubernetes",
+          "description": "kubecolor \u2014 colorized kubectl output",
+          "docs": "https://kubecolor.github.io/",
+          "artifact": {
+            "repo": "github",
+            "path": "kubecolor/kubecolor/releases/download/v{version}/kubecolor_{version}_linux_{goarch}.tar.gz",
+            "version": "0.5.0",
+            "install": "tar",
+            "bin": [
+              "kubecolor"
+            ]
+          }
+        },
+        "k9s": {
+          "category": "kubernetes",
+          "description": "k9s \u2014 terminal UI for Kubernetes",
+          "docs": "https://k9scli.io/",
+          "artifact": {
+            "repo": "github",
+            "path": "derailed/k9s/releases/download/v{version}/k9s_Linux_{goarch}.tar.gz",
+            "version": "0.50.6",
+            "install": "tar",
+            "bin": [
+              "k9s"
+            ]
+          }
+        },
+        "direnv": {
+          "category": "shell",
+          "description": "direnv \u2014 per-directory environment variables",
+          "docs": "https://direnv.net/",
+          "artifact": {
+            "repo": "github",
+            "path": "direnv/direnv/releases/download/v{version}/direnv.linux-{goarch}",
+            "version": "2.36.0",
+            "install": "binary",
+            "bin": [
+              "direnv"
+            ]
+          }
+        },
+        "duckdb": {
+          "category": "data",
+          "description": "DuckDB \u2014 in-process analytics database CLI",
+          "docs": "https://duckdb.org/docs/",
+          "artifact": {
+            "repo": "github",
+            "path": "duckdb/duckdb/releases/download/v{version}/duckdb_cli-linux-{goarch}.zip",
+            "version": "1.3.0",
+            "install": "zip",
+            "bin": [
+              "duckdb"
+            ]
+          }
+        }
+      },
+      "profiles": {
+        "standard": {
+          "label": "Standard",
+          "description": "Default. root inside a user namespace, Pod Security 'baseline', no host access.",
+          "tier": "standard",
+          "capabilities": [
+            "AUDIT_WRITE",
+            "CHOWN",
+            "DAC_OVERRIDE",
+            "FOWNER",
+            "FSETID",
+            "KILL",
+            "MKNOD",
+            "NET_BIND_SERVICE",
+            "SETFCAP",
+            "SETGID",
+            "SETPCAP",
+            "SETUID",
+            "SYS_CHROOT"
+          ]
+        },
+        "hardware": {
+          "label": "Hardware lab",
+          "description": "Privileged pod on the tainted lab node pool with the HOST kernel: device plugins, /dev, host kernel modules. One lab workspace per node.",
+          "tier": "lab",
+          "privileged": true,
+          "isolation": "none",
+          "hostPaths": [
+            "/lib/modules",
+            "/usr/src",
+            "/lib/firmware"
+          ],
+          "nodeSelector": {
+            "devspaces.io/lab": "true"
+          },
+          "tolerations": [
+            {
+              "key": "devspaces.io/lab",
+              "operator": "Equal",
+              "value": "true",
+              "effect": "NoSchedule"
+            }
+          ],
+          "exclusiveNode": true
+        },
+        "kernel": {
+          "label": "Kernel lab (micro-VM)",
+          "description": "Kata Containers micro-VM on the lab pool: your own guest kernel, safe to insmod/crash. PCI devices via VFIO device plugins.",
+          "tier": "lab",
+          "isolation": "kata",
+          "capabilities": [
+            "AUDIT_WRITE",
+            "CHOWN",
+            "DAC_OVERRIDE",
+            "FOWNER",
+            "FSETID",
+            "KILL",
+            "MKNOD",
+            "NET_ADMIN",
+            "NET_BIND_SERVICE",
+            "NET_RAW",
+            "SETFCAP",
+            "SETGID",
+            "SETPCAP",
+            "SETUID",
+            "SYS_ADMIN",
+            "SYS_CHROOT",
+            "SYS_MODULE",
+            "SYS_PTRACE",
+            "SYS_RAWIO",
+            "IPC_LOCK"
+          ],
+          "nodeSelector": {
+            "devspaces.io/lab": "true"
+          },
+          "tolerations": [
+            {
+              "key": "devspaces.io/lab",
+              "operator": "Equal",
+              "value": "true",
+              "effect": "NoSchedule"
+            }
+          ],
+          "exclusiveNode": false
+        }
+      },
+      "isolation": {
+        "userns": {
+          "hostUsers": false,
+          "description": "Linux user namespace (K8s >= 1.36 GA; kernel >= 6.3). Container root maps to an unprivileged host UID."
+        },
+        "gvisor": {
+          "runtimeClass": "gvisor",
+          "description": "gVisor (runsc) syscall sandbox. No userns needed; limited multicast/raw-socket support."
+        },
+        "kata": {
+          "runtimeClass": "kata",
+          "description": "Kata Containers micro-VM with its own guest kernel."
+        },
+        "none": {
+          "description": "Plain runc, shared kernel, host UIDs. Lab tier only."
+        }
+      },
+      "devices": {
+        "$comment": "Shown as choices in the portal's hardware step; any resource=quantity still works on the CLI.",
+        "nvidia.com/gpu": {
+          "label": "NVIDIA GPU",
+          "quantity": "1",
+          "docs": "https://github.com/NVIDIA/k8s-device-plugin#readme"
+        },
+        "smarter-devices/ttyUSB0": {
+          "label": "USB serial (ttyUSB0)",
+          "quantity": "1",
+          "docs": "https://gitlab.com/arm-research/smarter/smarter-device-manager"
+        },
+        "smarter-devices/ttyACM0": {
+          "label": "USB CDC serial (ttyACM0)",
+          "quantity": "1",
+          "docs": "https://gitlab.com/arm-research/smarter/smarter-device-manager"
+        },
+        "smarter-devices/i2c-1": {
+          "label": "I2C bus 1",
+          "quantity": "1",
+          "docs": "https://www.kernel.org/doc/html/latest/i2c/dev-interface.html"
+        },
+        "smarter-devices/video0": {
+          "label": "Camera (video0)",
+          "quantity": "1",
+          "docs": "https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/v4l2.html"
+        },
+        "intel.com/sriov_netdevice": {
+          "label": "SR-IOV network VF",
+          "quantity": "1",
+          "docs": "https://github.com/k8snetworkplumbingwg/sriov-network-device-plugin#readme"
+        },
+        "hugepages-2Mi": {
+          "label": "Hugepages 2Mi (DPDK)",
+          "quantity": "1Gi",
+          "docs": "https://kubernetes.io/docs/tasks/manage-hugepages/scheduling-hugepages/"
+        }
+      },
+      "networking": {
+        "clusterCIDRs": [
+          "10.244.0.0/16",
+          "10.96.0.0/12"
+        ],
+        "blockedEgress": [
+          "169.254.169.254/32"
+        ],
+        "multicast": {
+          "$comment": "mode=multus: a second interface (net1) from the NetworkAttachmentDefinition below. mode=cilium: Cilium's eBPF multicast datapath on the pod's normal interface (VXLAN tunnel mode, kernel >= 5.10 amd64 / 6.0 arm64, beta); `groups` are programmed cluster-wide by deploy/cluster/multicast-cilium.sh. --multicast works the same way for developers in both modes.",
+          "mode": "multus",
+          "nad": "devspaces-system/mcast",
+          "iface": "net1",
+          "groups": [
+            "239.255.0.0/24"
+          ]
+        },
+        "mesh": {
+          "$comment": "none (default): plain NetworkPolicy + DNS. istio-ambient: tenant namespaces are labelled istio.io/dataplane-mode=ambient at onboarding (mTLS identity, L7 policy, header routing) \u2014 see deploy/platform/mesh/ and docs/workspace-networking.md.",
+          "mode": "none"
+        },
+        "links": {
+          "$comment": "Developers may link a workspace to another developer's workspace (NetworkPolicy peer-* in their own namespace, consent on both sides). Set enabled=false to hide the feature.",
+          "enabled": true
+        }
+      },
+      "storage": {
+        "$comment": "Home drives (the PVC behind /home/dev) and shared drives (ReadWriteMany, mounted under /shared/<name>). `choices` are what developers pick with --storage / the Storage step; the storageClass must exist on the cluster (deploy/cluster/CONTRACT.md C6/C7). kind=home classes should use reclaimPolicy Retain + allowVolumeExpansion; kind=shared needs a ReadWriteMany driver (Azure Files, EFS, Filestore, NFS). An empty storageClass means the cluster default.",
+        "choices": [
+          {
+            "name": "fast",
+            "label": "Fast SSD",
+            "kind": "home",
+            "storageClass": "",
+            "accessModes": [
+              "ReadWriteOnce"
+            ],
+            "description": "Default. One disk per workspace, kept when the workspace is deleted; snapshots supported on CSI drivers.",
+            "default": true
+          },
+          {
+            "name": "standard",
+            "label": "Standard",
+            "kind": "home",
+            "storageClass": "",
+            "accessModes": [
+              "ReadWriteOnce"
+            ],
+            "description": "Cheaper disk for occasional workspaces. Same persistence rules."
+          },
+          {
+            "name": "shared",
+            "label": "Shared folder",
+            "kind": "shared",
+            "storageClass": "",
+            "accessModes": [
+              "ReadWriteMany"
+            ],
+            "description": "A folder several workspaces (and, if you share it, several developers) mount at the same time under /shared/<name>.",
+            "default": true
+          }
+        ],
+        "snapshotClass": "",
+        "protectHomeDrives": true,
+        "sharedMountPath": "/shared"
+      }
+    }
+kind: ConfigMap
+metadata:
+  name: workspace-catalog
+  namespace: devspaces-system
+---
+apiVersion: v1
+data:
+  example-tool.sh: |
+    #!/usr/bin/env bash
+    # Example hot-added feature. Admins put installers in the `workspace-features`
+    # ConfigMap (deploy/platform/kustomization.yaml); the file name minus .sh is the
+    # tool name developers pass to --tools, after adding it to catalog.json "tools".
+    # Runs as root at pod boot; must be idempotent; never write to /home/dev.
+    set -Eeuo pipefail
+    . /opt/workspace/lib.sh
+    apt_install shellcheck bats
+    profile_env example-tool 'export EXAMPLE_TOOL=1'
+kind: ConfigMap
+metadata:
+  name: workspace-features
+  namespace: devspaces-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: workspace-reaper
+  namespace: devspaces-system
+spec:
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 540
+      backoffLimit: 1
+      template:
+        spec:
+          containers:
+          - args:
+            - admin
+            - reap
+            - --all-namespaces
+            - --verbose
+            env:
+            - name: HOME
+              value: /tmp
+            image:workspace/workspace-portal:dev-cli:2026.10
+            name: reaper
+            resources:
+              limits:
+                cpu: 500m
+                memory: 256Mi
+              requests:
+                cpu: 50m
+                memory: 64Mi
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                - ALL
+              readOnlyRootFilesystem: true
+            volumeMounts:
+            - mountPath: /tmp
+              name: tmp
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          serviceAccountName: workspace-reaper
+          volumes:
+          - emptyDir: {}
+            name: tmp
+  schedule: '*/10 * * * *'
+  successfulJobsHistoryLimit: 3
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: devspaces-portal-sharing-scope
+  namespace: devspaces-system
+spec:
+  failurePolicy: Fail
+  matchConditions:
+  - expression: request.userInfo.username == 'system:serviceaccount:devspaces-system:workspace-portal'
+    name: onlyThePortalSA
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - rbac.authorization.k8s.io
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      - DELETE
+      resources:
+      - roles
+      - rolebindings
+    - apiGroups:
+      - networking.k8s.io
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - DELETE
+      resources:
+      - networkpolicies
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - DELETE
+      resources:
+      - persistentvolumes
+      - persistentvolumeclaims
+  validations:
+  - expression: variables.name.startsWith('share-') || variables.name.startsWith('workspace-guest-')
+      || variables.name.startsWith('peer-') || variables.name.startsWith('shared-')
+    message: the portal may only manage share-*, workspace-guest-*, peer-* and shared-*
+      objects
+  variables:
+  - expression: 'request.operation == ''DELETE'' ? oldObject.metadata.name : object.metadata.name'
+    name: name
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: devspaces-protect-home-drives
+  namespace: devspaces-system
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+      - key: devspaces.io/tenant
+        operator: Exists
+    resourceRules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - DELETE
+      resources:
+      - persistentvolumeclaims
+  validations:
+  - expression: '!(has(oldObject.metadata.labels) && ''devspaces.io/drive'' in oldObject.metadata.labels
+      && oldObject.metadata.labels[''devspaces.io/drive''] == ''home'') || (has(oldObject.metadata.annotations)
+      && ''devspaces.io/allow-delete'' in oldObject.metadata.annotations && oldObject.metadata.annotations[''devspaces.io/allow-delete'']
+      == ''true'')'
+    message: 'this is a home drive (devspaces.io/drive=home); it survives workspace
+      deletion on purpose. To really delete it: workspace delete NAME --purge, or
+      annotate devspaces.io/allow-delete=true first'
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: devspaces-protect-tenant-policies
+  namespace: devspaces-system
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+      - key: devspaces.io/tenant
+        operator: Exists
+    resourceRules:
+    - apiGroups:
+      - networking.k8s.io
+      apiVersions:
+      - v1
+      operations:
+      - DELETE
+      - UPDATE
+      resources:
+      - networkpolicies
+  validations:
+  - expression: '!(oldObject.metadata.name in [''tenant-ingress'', ''tenant-egress''])
+      || request.userInfo.groups.exists(g, g in [''system:masters'', ''devspaces:platform-admins'',
+      ''system:serviceaccounts:argocd'', ''system:serviceaccounts:flux-system''])'
+    message: the tenant-ingress/tenant-egress policies are managed by the platform
+      (group devspaces:platform-admins)
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: devspaces-workspace-guardrails
+  namespace: devspaces-system
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    namespaceSelector:
+      matchExpressions:
+      - key: devspaces.io/tenant
+        operator: Exists
+    resourceRules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - pods
+  validations:
+  - expression: '!(has(object.spec.hostNetwork) && object.spec.hostNetwork) && !(has(object.spec.hostPID)
+      && object.spec.hostPID) && !(has(object.spec.hostIPC) && object.spec.hostIPC)'
+    message: workspaces may not use hostNetwork, hostPID or hostIPC (use a device
+      plugin or SR-IOV instead)
+  - expression: variables.isLab || (has(object.spec.hostUsers) && object.spec.hostUsers
+      == false) || (has(object.spec.runtimeClassName) && object.spec.runtimeClassName
+      in ['gvisor', 'kata'])
+    message: standard-tier workspaces must set hostUsers=false or run under the gvisor/kata
+      RuntimeClass
+  - expression: variables.isLab || !variables.allContainers.exists(c, has(c.securityContext)
+      && has(c.securityContext.privileged) && c.securityContext.privileged)
+    message: privileged containers are only allowed in *-lab namespaces (workspace
+      create --profile hardware)
+  - expression: variables.hostPaths.all(p, variables.isLab && variables.allowedHostPathPrefixes.exists(a,
+      p == a || p.startsWith(a + '/')))
+    message: hostPath volumes must be under /dev, /sys, /lib/modules, /usr/src, /lib/firmware
+      or /run/udev and only in lab namespaces
+  - expression: '!variables.hostPaths.exists(p, p.startsWith(''/var/run'') || p.startsWith(''/run/containerd'')
+      || p.startsWith(''/var/lib/kubelet'') || p.startsWith(''/etc/kubernetes''))'
+    message: mounting runtime or kubelet state from the host is not allowed
+  - expression: '!variables.isLab || (has(object.spec.nodeSelector) && ''devspaces.io/lab''
+      in object.spec.nodeSelector)'
+    message: lab-tier workspaces must select the lab node pool (nodeSelector devspaces.io/lab=true)
+  variables:
+  - expression: has(namespaceObject.metadata.labels) && 'devspaces.io/tier' in namespaceObject.metadata.labels
+      && namespaceObject.metadata.labels['devspaces.io/tier'] == 'lab'
+    name: isLab
+  - expression: 'object.spec.containers + (has(object.spec.initContainers) ? object.spec.initContainers
+      : []) + (has(object.spec.ephemeralContainers) ? object.spec.ephemeralContainers
+      : [])'
+    name: allContainers
+  - expression: 'has(object.spec.volumes) ? object.spec.volumes.filter(v, has(v.hostPath)).map(v,
+      v.hostPath.path) : []'
+    name: hostPaths
+  - expression: '[''/dev'', ''/sys'', ''/lib/modules'', ''/usr/src'', ''/lib/firmware'',
+      ''/run/udev'']'
+    name: allowedHostPathPrefixes
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: devspaces-portal-sharing-scope
+  namespace: devspaces-system
+spec:
+  policyName: devspaces-portal-sharing-scope
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: devspaces-protect-home-drives
+  namespace: devspaces-system
+spec:
+  policyName: devspaces-protect-home-drives
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: devspaces-protect-tenant-policies
+  namespace: devspaces-system
+spec:
+  policyName: devspaces-protect-tenant-policies
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: devspaces-workspace-guardrails
+  namespace: devspaces-system
+spec:
+  policyName: devspaces-workspace-guardrails
+  validationActions:
+  - Deny
+  - Audit
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: mcast
+  namespace: devspaces-system
+spec:
+  config: |
+    {
+      "cniVersion": "0.4.0",
+      "name": "mcast",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "master": "eth0",
+          "mode": "bridge",
+          "mtu": 1500,
+          "ipam": {
+            "type": "whereabouts",
+            "range": "10.250.0.0/16",
+            "exclude": ["10.250.0.0/30", "10.250.255.255/32"],
+            "routes": [
+              { "dst": "224.0.0.0/4" }
+            ]
+          }
+        },
+        {
+          "type": "tuning",
+          "sysctl": {
+            "net.ipv4.conf.net1.rp_filter": "0",
+            "net.ipv4.conf.all.rp_filter": "0",
+            "net.ipv4.igmp_max_memberships": "1024",
+            "net.ipv4.igmp_max_msf": "64",
+            "net.ipv4.conf.net1.force_igmp_version": "0",
+            "net.core.rmem_max": "26214400"
+          }
+        }
+      ]
+    }
+---
+apiVersion: node.k8s.io/v1
+handler: runsc
+kind: RuntimeClass
+metadata:
+  name: gvisor
+overhead:
+  podFixed:
+    cpu: 100m
+    memory: 128Mi
+scheduling:
+  nodeSelector:
+    devspaces.io/runtime-gvisor: "true"
+---
+apiVersion: node.k8s.io/v1
+handler: kata-qemu
+kind: RuntimeClass
+metadata:
+  name: kata
+overhead:
+  podFixed:
+    cpu: 250m
+    memory: 350Mi
+scheduling:
+  nodeSelector:
+    devspaces.io/lab: "true"
+  tolerations:
+  - effect: NoSchedule
+    key: devspaces.io/lab
+    operator: Equal
+    value: "true"

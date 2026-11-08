@@ -1,0 +1,37 @@
+# EXAMPLE — Istio ambient: enrol a developer namespace in the mesh. With catalog
+# networking.mesh=istio-ambient the onboarding tool adds this label itself; shown here so
+# you can see exactly what changes (one label, no pod restarts, no sidecars).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ws-alice
+  labels:
+    devspaces.io/tenant: alice
+    devspaces.io/tier: standard
+    istio.io/dataplane-mode: ambient          # ← ztunnel on each node now carries this namespace's traffic over mTLS
+---
+# A project ("virtual namespace") enrolled the same way, plus a waypoint for L7 features (see waypoint.yaml).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ws-proj-checkout
+  labels:
+    devspaces.io/tenant: proj-checkout
+    devspaces.io/kind: project
+    istio.io/dataplane-mode: ambient
+    istio.io/use-waypoint: checkout-waypoint   # route this namespace's traffic through the waypoint (L7)
+---
+# Opting ONE workspace pod out (e.g. a hardware-lab pod doing raw sockets): the CLI sets this
+# label when the profile declares `mesh: false`.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ws-fpga-0
+  namespace: ws-alice-lab
+  labels:
+    devspaces.io/workspace: fpga
+    istio.io/dataplane-mode: none
+spec:
+  containers:
+    - name: workspace
+      image: devspacesacr.azurecr.io/devspaces/workspace-cpp:2026.11

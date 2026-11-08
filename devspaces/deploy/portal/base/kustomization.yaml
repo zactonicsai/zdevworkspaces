@@ -1,0 +1,7 @@
+# Portal only (ServiceAccount, impersonation ClusterRole, Deployment, Service,
+# NetworkPolicy). Referenced by deploy/portal (production, adds oauth2-proxy +
+# Ingress) and by deploy/demo (kind, dev-user mode).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - portal.yaml

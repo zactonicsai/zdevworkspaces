@@ -1,0 +1,65 @@
+# EXAMPLE — Istio ambient L4 authorization for one workspace (enforced by ztunnel using mTLS identity,
+# so it cannot be fooled by IP spoofing or by a pod that merely happens to be in an allowed CIDR).
+# Semantics match the platform's NetworkPolicy tiers:
+#   * anything in the same namespace (Alice's other workspaces) may connect
+#   * the linked peer — Bob's workspace "api" — may connect (this is the mesh twin of `wsctl link add api bob@corp.example/api`)
+#   * nothing else may, including other developers in the mesh
+# Identities: ambient gives every pod spiffe://<trust-domain>/ns/<namespace>/sa/<serviceaccount>.
+# Workspace pods run with the namespace's `default` ServiceAccount, so a namespace == a developer.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: ws-api-allow
+  namespace: ws-alice
+  labels:
+    devspaces.io/workspace: api
+    devspaces.io/managed-by: workspace-cli
+spec:
+  selector:
+    matchLabels:
+      devspaces.io/workspace: api
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: ["ws-alice"]                         # tier 1: my own workspaces
+    - from:
+        - source:
+            principals: ["cluster.local/ns/ws-bob/sa/default"]   # tier 3: a linked peer (Bob)
+      to:
+        - operation:
+            ports: ["8080", "5432"]                          # optionally only the ports the link asked for
+---
+# Default-deny for everything else in the namespace that is NOT covered by an ALLOW above.
+# (An ALLOW policy that selects a pod already denies what it does not list; this makes the
+# intent explicit for pods without their own policy.)
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: tenant-default
+  namespace: ws-alice
+spec:
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: ["ws-alice", "devspaces-system"]     # own workspaces + the platform (reaper probes, portal tunnel)
+---
+# Platform-wide: the portal's tunnel and the reaper need to reach sshd (2222) in every tenant namespace.
+# Applied once in istio-system (root namespace) so tenants cannot lock the platform out.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: devspaces-platform-access
+  namespace: istio-system
+spec:
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/devspaces-system/sa/workspace-portal"
+              - "cluster.local/ns/devspaces-system/sa/workspace-reaper"
+      to:
+        - operation:
+            ports: ["2222"]

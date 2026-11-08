@@ -1,0 +1,135 @@
+# Keycloak + the Workspaces portal, sign-in required. One file, two ways to run it:
+#
+#   docker compose up -d                    # profile "stub" (default): no cluster — the API answers from static JSON,
+#                                           #   but you still have to log in (alice / alice) — tests the whole login path
+#   COMPOSE_PROFILES=kube docker compose up -d
+#                                           # the API deploys REAL developer pods on the kind cluster from docs/demo-docker.md
+#                                           #   (./up.sh kube does the cluster wiring for you)
+#
+#   Portal   http://localhost:8080          Keycloak admin  http://localhost:8180  (admin / admin)
+#   Users    alice@example.com / alice · bob@example.com / bob · admin@example.com / admin   (realm "devspaces")
+name: devspaces-keycloak
+
+x-portal: &portal
+  image: ${PORTAL_IMAGE:-workspace/workspace-portal-py:dev}
+  build: { context: ../../.., dockerfile: portal-py/Dockerfile, args: { SKIP_CSS: "${SKIP_CSS:-0}" } }
+  depends_on:
+    keycloak: { condition: service_healthy }
+  ports: ["8080:8080"]
+  environment:
+    # API side: only tokens from this realm, for audience devspaces-api, open the API.
+    # The browser reaches Keycloak at localhost:8180 (that is the issuer in the tokens); this
+    # container reaches it as http://keycloak:8180, hence the separate discovery URL.
+    PORTAL_OIDC_ISSUER: http://localhost:8180/realms/devspaces
+    PORTAL_OIDC_DISCOVERY_URL: http://keycloak:8180/realms/devspaces/.well-known/openid-configuration
+    PORTAL_OIDC_AUDIENCE: devspaces-api
+    PORTAL_OIDC_USER_CLAIM: preferred_username
+    PORTAL_OIDC_GROUPS_CLAIM: groups
+    # UI side: PKCE login in the browser with the public client; wsctl uses devspaces-cli (device code)
+    PORTAL_UI_OIDC_ISSUER: http://localhost:8180/realms/devspaces
+    PORTAL_UI_OIDC_CLIENT_ID: devspaces-portal
+    PORTAL_UI_OIDC_SCOPE: openid profile email
+    PORTAL_CLI_CLIENT_ID: devspaces-cli
+    PORTAL_CLI_SCOPE: openid profile email offline_access
+    PORTAL_UI_STUB_TOGGLE: "false"        # no "stub" escape hatch in the footer: login is the point of this stack
+    PORTAL_LAB_GROUP: ""                  # e.g. platform-admins to hide hardware profiles from everyone else
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+    interval: 10s
+    timeout: 3s
+    retries: 10
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    command: ["start-dev", "--import-realm", "--http-port=8180", "--health-enabled=true", "--metrics-enabled=false"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      # The issuer must be what the BROWSER sees: tokens then carry http://localhost:8180/realms/devspaces.
+      # The portal container talks to http://keycloak:8180 (backchannel) and tells its verifier so.
+      KC_HOSTNAME: http://localhost:8180
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./realm-devspaces.json:/opt/keycloak/data/import/realm-devspaces.json:ro
+      - keycloak-data:/opt/keycloak/data/h2         # dev-mode H2 database: users/sessions survive restarts
+    ports: ["8180:8180"]
+    healthcheck:
+      # the management port (9000) serves /health in Keycloak 25+; bash's /dev/tcp avoids needing curl in the image
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '\"status\": *\"UP\"' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+  # ---- profile "stub": login required, data from portal/web/stub/*.json, nothing else needed
+  portal:
+    <<: *portal
+    profiles: ["stub"]
+    command: ["-stub"]
+
+  # ---- profile "kube": the API creates real workspaces (StatefulSets, PVCs, pods) on the kind
+  # cluster "devspaces" from docs/demo-docker.md. ./up.sh kube writes kubeconfig-internal (server
+  # https://devspaces-control-plane:6443, reachable on the "kind" Docker network) and onboards
+  # alice@example.com / bob@example.com so impersonation has namespaces to land in.
+  portal-kube:
+    <<: *portal
+    profiles: ["kube"]
+    command: []
+    environment:
+      KUBECONFIG: /kube/config
+      WORKSPACE_SYSTEM_NAMESPACE: devspaces-system
+      PORTAL_OIDC_ISSUER: http://localhost:8180/realms/devspaces
+      PORTAL_OIDC_DISCOVERY_URL: http://keycloak:8180/realms/devspaces/.well-known/openid-configuration
+      PORTAL_OIDC_AUDIENCE: devspaces-api
+      PORTAL_UI_OIDC_ISSUER: http://localhost:8180/realms/devspaces
+      PORTAL_UI_OIDC_CLIENT_ID: devspaces-portal
+      PORTAL_CLI_CLIENT_ID: devspaces-cli
+      PORTAL_CLI_SCOPE: openid profile email offline_access
+      PORTAL_UI_STUB_TOGGLE: "false"
+    volumes:
+      - ./kubeconfig-internal:/kube/config:ro
+    networks: [default, kind]
+
+  # ---- optional: session mode instead of browser PKCE (oauth2-proxy in front, like the Helm chart's default)
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.8.1
+    profiles: ["oauth2-proxy"]
+    depends_on:
+      keycloak: { condition: service_healthy }
+    command:
+      - --provider=keycloak-oidc
+      - --oidc-issuer-url=http://localhost:8180/realms/devspaces
+      - --skip-oidc-discovery=true
+      - --login-url=http://localhost:8180/realms/devspaces/protocol/openid-connect/auth
+      - --redeem-url=http://keycloak:8180/realms/devspaces/protocol/openid-connect/token
+      - --oidc-jwks-url=http://keycloak:8180/realms/devspaces/protocol/openid-connect/certs
+      - --client-id=oauth2-proxy
+      - --client-secret=oauth2-proxy-demo-secret
+      - --cookie-secret=${OAUTH2_PROXY_COOKIE_SECRET:-0123456789abcdef0123456789abcdef}
+      - --cookie-secure=false
+      - --email-domain=*
+      - --upstream=http://portal-session:8080/
+      - --http-address=0.0.0.0:4180
+      - --set-xauthrequest=true
+      - --pass-user-headers=true
+      - --oidc-groups-claim=groups
+    ports: ["4180:4180"]
+  portal-session:
+    <<: *portal
+    profiles: ["oauth2-proxy"]
+    ports: []
+    command: ["-stub", "-user-header=X-Forwarded-Email", "-trusted-proxies=0.0.0.0/0"]
+    environment: {}
+
+volumes:
+  keycloak-data:
+
+networks:
+  default: {}
+  kind:
+    external: true      # created by `kind create cluster`; only used by the kube profile

@@ -1,0 +1,68 @@
+# Demo overlay: the whole platform + the portal, adapted to a local kind cluster.
+#   kubectl apply -k deploy/demo
+# Differences from production: local images, demo catalog, no Multus network
+# attachment (kind has no Multus), portal runs as a fixed user (-dev-user) with
+# no auth proxy, and the portal NetworkPolicy is dropped so port-forward works
+# from any client. NEVER use these settings outside a throwaway cluster.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: devspaces-system
+
+resources:
+  - ../platform
+  - ../portal/base
+
+configMapGenerator:
+  - name: workspace-catalog
+    behavior: replace
+    files:
+      - catalog.json=catalog.demo.json
+    options:
+      disableNameSuffixHash: true
+
+images:
+  - name: ghcr.io/example/devspaces/workspace-cli
+    newName: workspace/workspace-cli
+    newTag: dev
+  - name: ghcr.io/example/devspaces/workspace-portal
+    newName: workspace/workspace-portal
+    newTag: dev
+
+patches:
+  # kind has no Multus: drop the NetworkAttachmentDefinition (its CRD does not exist)
+  - patch: |-
+      $patch: delete
+      apiVersion: k8s.cni.cncf.io/v1
+      kind: NetworkAttachmentDefinition
+      metadata:
+        name: mcast
+        namespace: devspaces-system
+  # the portal must be reachable through `kubectl port-forward` from any client
+  - patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: workspace-portal-ingress
+        namespace: devspaces-system
+  # one replica, fixed identity, side-loaded image (never pulled)
+  - target:
+      kind: Deployment
+      name: workspace-portal
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+      - op: replace
+        path: /spec/template/spec/containers/0/args
+        value: ["-addr=:8080", "-dev-user=demo@example.com"]
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent
+  - target:
+      kind: CronJob
+      name: workspace-reaper
+    patch: |-
+      - op: add
+        path: /spec/jobTemplate/spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent

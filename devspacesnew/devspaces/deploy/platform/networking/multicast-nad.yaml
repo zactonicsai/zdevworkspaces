@@ -1,0 +1,107 @@
+# Multicast network for workspaces created with --multicast.
+#
+# Why a secondary network: the primary pod network of every mainstream CNI is
+# built for unicast — overlays (VXLAN/Geneve) replicate nothing, and IPAM/policy
+# datapaths drop 224.0.0.0/4. Rather than depending on one CNI's beta feature,
+# workspaces get a second interface (net1) on a flat L2 segment where IGMP and
+# multicast forwarding work exactly as they do on bare metal.
+#
+# Requirements on the lab/standard node pool:
+#   * Multus CNI (thick or thin) + the reference plugins (macvlan, tuning) +
+#     whereabouts IPAM:  https://github.com/k8snetworkplumbingwg/multus-cni
+#   * `master` below must be the node NIC (or VLAN sub-interface) carrying the
+#     multicast VLAN; the switch needs an IGMP querier (or snooping disabled)
+#     for cross-node delivery. Pods on the same node always see each other
+#     (macvlan bridge mode) regardless of the fabric.
+#   * Cloud VPCs (AWS/GCP/Azure) do not forward multicast between VMs: there,
+#     run the multicast pool on bare-metal/on-prem nodes, or use the Cilium
+#     multicast datapath (notes at the bottom).
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: mcast
+  namespace: devspaces-system
+spec:
+  config: |
+    {
+      "cniVersion": "0.4.0",
+      "name": "mcast",
+      "plugins": [
+        {
+          "type": "macvlan",
+          "master": "eth0",
+          "mode": "bridge",
+          "mtu": 1500,
+          "ipam": {
+            "type": "whereabouts",
+            "range": "10.250.0.0/16",
+            "exclude": ["10.250.0.0/30", "10.250.255.255/32"],
+            "routes": [
+              { "dst": "224.0.0.0/4" }
+            ]
+          }
+        },
+        {
+          "type": "tuning",
+          "sysctl": {
+            "net.ipv4.conf.net1.rp_filter": "0",
+            "net.ipv4.conf.all.rp_filter": "0",
+            "net.ipv4.igmp_max_memberships": "1024",
+            "net.ipv4.igmp_max_msf": "64",
+            "net.ipv4.conf.net1.force_igmp_version": "0",
+            "net.core.rmem_max": "26214400"
+          }
+        }
+      ]
+    }
+---
+# Multus namespace isolation: a NAD in devspaces-system may be used from any
+# tenant namespace. (Only needed when Multus runs with --namespace-isolation;
+# harmless otherwise.)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multus-global-namespaces
+  namespace: devspaces-system
+data:
+  note: |
+    Pass `--global-namespaces=devspaces-system` to the Multus daemonset (thin plugin)
+    or set "globalNamespaces": "devspaces-system" in the thick-plugin daemon config.
+---
+# Node preparation for the multicast pool. Applied by your node bootstrap
+# (cloud-init / MachineConfig / Talos patch); shown here as a DaemonSet-free
+# reference so the required host state is explicit.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multicast-node-prep
+  namespace: devspaces-system
+data:
+  99-devspaces-multicast.conf: |
+    # /etc/sysctl.d/99-devspaces-multicast.conf
+    net.ipv4.conf.all.rp_filter = 0
+    net.ipv4.conf.default.rp_filter = 0
+    net.ipv4.igmp_max_memberships = 1024
+    net.core.rmem_max = 26214400
+    net.core.wmem_max = 26214400
+  kubelet-config-snippet.yaml: |
+    # Only needed for lab profiles that set pod-level sysctls; the multicast
+    # NAD itself needs nothing here (its tuning plugin acts inside the pod netns).
+    apiVersion: kubelet.config.k8s.io/v1beta1
+    kind: KubeletConfiguration
+    allowedUnsafeSysctls:
+      - "net.*"
+  promisc.sh: |
+    # macvlan bridge mode needs the master NIC to accept multicast for all child MACs.
+    ip link set dev eth0 allmulticast on
+  cilium-alternative.md: |
+    If the cluster runs Cilium ≥ 1.16 in VXLAN mode you can instead enable its
+    eBPF multicast datapath (beta) and skip Multus:
+        cilium config set multicast-enabled true
+        # per node: cilium-dbg bpf multicast group add 239.255.0.0/16 ... and
+        # subscriber add <group> <pod-ip>   (Isovalent Enterprise automates this
+        # with the IsovalentMulticastGroup CRD)
+    Groups and subscribers are then programmed per pod IP, so pair it with a small
+    controller or the `workspace` CLI hook of your choice. The NAD approach above
+    is CNI-agnostic and needs no per-pod programming, which is why it is the default.

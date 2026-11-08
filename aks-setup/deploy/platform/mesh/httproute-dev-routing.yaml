@@ -1,0 +1,69 @@
+# EXAMPLE — "test my branch against the team's stack": the project ws-proj-checkout runs a shared
+# `api` Service (a real deployment, or a long-lived workspace). Normal traffic to api.ws-proj-checkout.svc
+# goes there. A request carrying `x-dev: alice` is sent to Alice's workspace instead, where she runs
+# her modified API on port 8080. Nobody else notices. Needs waypoint.yaml in the namespace.
+#
+# Try it from any workspace in the project:
+#   curl http://api.ws-proj-checkout.svc.cluster.local:8080/health                  # team version
+#   curl -H 'x-dev: alice' http://api.ws-proj-checkout.svc.cluster.local:8080/health  # Alice's branch
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api-dev-routing
+  namespace: ws-proj-checkout
+spec:
+  parentRefs:
+    - group: ""
+      kind: Service
+      name: api                     # the shared Service this route hangs off
+      port: 8080
+  rules:
+    - matches:
+        - headers:
+            - name: x-dev
+              value: alice
+      backendRefs:
+        - name: ws-api-alice        # headless Service of Alice's workspace "api-alice" in this project namespace
+          port: 8080
+    - matches:
+        - headers:
+            - name: x-dev
+              value: bob
+      backendRefs:
+        - name: ws-api-bob
+          port: 8080
+      filters:
+        - type: RequestHeaderModifier   # tell Bob's service it is being tested
+          requestHeaderModifier:
+            add:
+              - name: x-dev-routed
+                value: "true"
+    - backendRefs:                      # default: the team's shared service
+        - name: api
+          port: 8080
+      timeouts:
+        request: 30s
+---
+# Mirror 10% of real team traffic to Carol's workspace (she only observes; responses are discarded).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api-mirror-carol
+  namespace: ws-proj-checkout
+spec:
+  parentRefs:
+    - group: ""
+      kind: Service
+      name: api
+      port: 8080
+  rules:
+    - filters:
+        - type: RequestMirror
+          requestMirror:
+            backendRef:
+              name: ws-api-carol
+              port: 8080
+            percent: 10
+      backendRefs:
+        - name: api
+          port: 8080

@@ -1,0 +1,107 @@
+# Authentication in front of the portal with oauth2-proxy against your OIDC
+# provider (Okta, Entra ID, Keycloak, Google…). oauth2-proxy validates the login
+# and forwards the request to the portal with X-Forwarded-Email / -Groups set;
+# the portal impersonates that identity towards Kubernetes.
+#
+# The e-mail must match how the API server names users (the OIDC `email` claim
+# with --oidc-username-claim=email, or whatever your cluster uses) so that
+# `workspace admin onboard alice@corp.example` and the portal agree.
+#
+# Any other authenticating proxy works the same way (Istio + RequestAuthentication,
+# cloud IAP, Pomerium): point -user-header / -groups-header at its headers.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oauth2-proxy
+  namespace: devspaces-system
+type: Opaque
+stringData:
+  client-id: "replace-me"
+  client-secret: "replace-me"
+  cookie-secret: "replace-with-32-random-bytes-base64"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy
+  namespace: devspaces-system
+  labels: { app.kubernetes.io/name: oauth2-proxy }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app.kubernetes.io/name: oauth2-proxy }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: oauth2-proxy }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 2000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: oauth2-proxy
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.8.1
+          args:
+            - --provider=oidc
+            - --oidc-issuer-url=https://login.example.com/
+            - --email-domain=corp.example
+            - --upstream=http://workspace-portal.devspaces-system.svc/
+            - --http-address=0.0.0.0:4180
+            - --cookie-secure=true
+            - --cookie-samesite=lax
+            - --cookie-refresh=1h
+            - --set-xauthrequest=true          # X-Auth-Request-Email/-Groups on the response
+            - --pass-user-headers=true         # X-Forwarded-User / X-Forwarded-Email / X-Forwarded-Groups upstream
+            - --pass-access-token=false
+            - --skip-provider-button=true
+            - --oidc-groups-claim=groups
+          env:
+            - name: OAUTH2_PROXY_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: oauth2-proxy, key: client-id } }
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: oauth2-proxy, key: client-secret } }
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom: { secretKeyRef: { name: oauth2-proxy, key: cookie-secret } }
+          ports:
+            - { name: http, containerPort: 4180 }
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy
+  namespace: devspaces-system
+spec:
+  selector: { app.kubernetes.io/name: oauth2-proxy }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: workspaces
+  namespace: devspaces-system
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt   # or your internal issuer
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [workspaces.corp.example]
+      secretName: workspaces-tls
+  rules:
+    - host: workspaces.corp.example
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: oauth2-proxy
+                port: { name: http }

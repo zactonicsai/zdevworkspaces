@@ -1,0 +1,197 @@
+# What sharing and linking create (owner alice, guest/peer bob):
+#   workspace link add web --to bob@corp.example/api --ports 8080     → NetworkPolicy peer-web-bob-api in ws-alice
+#   workspace drives create-shared team-data --size 100Gi              → PVC shared-team-data (RWX)
+#   workspace share add api bob@corp.example --key bob.pub             → Role workspace-guest-api + RoleBinding share-api-bob (+ bob's key in ws-api-ssh)
+#   portal: share drive team-data with bob (read-only)                 → PV + PVC shared-alice-team-data in ws-bob pointing at the SAME Azure Files share
+---
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: peer-web-bob-api
+  namespace: ws-alice
+  labels:
+    devspaces.io/workspace: web
+    devspaces.io/link: peer
+    app.kubernetes.io/managed-by: workspace-cli
+  annotations:
+    devspaces.io/peer: bob/api
+spec:
+  podSelector:
+    matchLabels:
+      devspaces.io/workspace: web
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ws-bob
+      podSelector:
+        matchLabels:
+          devspaces.io/workspace: api
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ws-bob
+      podSelector:
+        matchLabels:
+          devspaces.io/workspace: api
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-team-data
+  namespace: ws-alice
+  labels:
+    devspaces.io/drive: shared
+    app.kubernetes.io/managed-by: workspace-cli
+    devspaces.io/tenant: alice
+  annotations:
+    devspaces.io/storage: shared
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: workspace-shared-files
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workspace-guest-api
+  namespace: ws-alice
+  labels:
+    devspaces.io/workspace: api
+    app.kubernetes.io/managed-by: workspace-cli
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  resourceNames:
+  - ws-api-0
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  - pods/portforward
+  resourceNames:
+  - ws-api-0
+  verbs:
+  - create
+  - get
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  resourceNames:
+  - ws-api
+  verbs:
+  - get
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets/scale
+  resourceNames:
+  - ws-api
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - services
+  resourceNames:
+  - ws-api
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  resourceNames:
+  - ws-api-ssh
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: share-api-bob
+  namespace: ws-alice
+  labels:
+    devspaces.io/workspace: api
+    devspaces.io/share: workspace
+    devspaces.io/guest: bob
+    app.kubernetes.io/managed-by: workspace-cli
+  annotations:
+    devspaces.io/guest-user: bob@corp.example
+subjects:
+- kind: User
+  name: bob@corp.example
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workspace-guest-api
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: shared-alice-team-data-bob
+  labels:
+    devspaces.io/drive: shared-mount
+    devspaces.io/shared-by: alice
+    app.kubernetes.io/managed-by: workspace-cli
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+  - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: workspace-shared-files
+  mountOptions:
+  - uid=1000
+  - gid=1000
+  csi:
+    driver: file.csi.azure.com
+    volumeHandle: "rg#stdevspaces#pvc-1234#"
+    volumeAttributes:
+      shareName: pvc-1234
+    nodeStageSecretRef:
+      name: azure-storage-account-stdevspaces-secret
+      namespace: ws-alice
+    readOnly: true
+  claimRef:
+    namespace: ws-bob
+    name: shared-alice-team-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-alice-team-data
+  namespace: ws-bob
+  labels:
+    devspaces.io/drive: shared-mount
+    devspaces.io/shared-by: alice
+    app.kubernetes.io/managed-by: workspace-cli
+  annotations:
+    devspaces.io/storage: shared
+spec:
+  accessModes:
+  - ReadWriteMany
+  volumeName: shared-alice-team-data-bob
+  storageClassName: workspace-shared-files
+  resources:
+    requests:
+      storage: 100Gi

@@ -1,0 +1,16 @@
+# EXAMPLE — a waypoint proxy for the project namespace ws-proj-checkout. Ambient's ztunnel does
+# L4 (mTLS, TCP authz). Anything HTTP-aware — header routing, retries, L7 AuthorizationPolicy —
+# needs a waypoint. Equivalent to:  istioctl waypoint apply -n ws-proj-checkout --name checkout-waypoint --enroll-namespace
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: checkout-waypoint
+  namespace: ws-proj-checkout
+  labels:
+    istio.io/waypoint-for: service        # service (default) | workload | all
+spec:
+  gatewayClassName: istio-waypoint
+  listeners:
+    - name: mesh
+      port: 15008
+      protocol: HBONE

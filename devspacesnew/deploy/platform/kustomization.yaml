@@ -1,0 +1,33 @@
+# Cluster-wide pieces, installed once by a platform admin:
+#   kubectl apply -k deploy/platform
+# Per-developer namespaces are created with `workspace admin onboard <user>`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: devspaces-system
+
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - reaper.yaml
+  - networking/multicast-nad.yaml
+  - compute/runtime-classes.yaml
+  - compute/device-plugins.yaml
+  - policy/admission.yaml
+
+configMapGenerator:
+  - name: workspace-catalog
+    files:
+      - catalog.json
+    options:
+      disableNameSuffixHash: true   # the CLI reads it by name
+  # Optional: admins drop extra feature installers here; they are mounted at
+  # /opt/workspace/features.d and usable with --tools without an image rebuild.
+  - name: workspace-features
+    files:
+      - example-tool.sh=features/example-tool.sh
+    options:
+      disableNameSuffixHash: true
+
+images:
+  - name:workspace/workspace-portal:dev-cli
+    newTag: "2026.10"

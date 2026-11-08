@@ -1,0 +1,12 @@
+# The developer portal: kubectl apply -k deploy/portal
+# Requires deploy/platform first (catalog ConfigMap, RBAC ClusterRoles).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: devspaces-system
+resources:
+  - base
+  - ingress-oauth2-proxy.yaml
+images:
+  - name:workspace/workspace-portal:dev-portal
+    newName: artifactory.example.com/devspaces-docker/workspace-portal
+    newTag: "2026.10"

@@ -1,0 +1,26 @@
+# kind cluster for the devspaces demo: one control plane, one normal worker, one
+# "lab" worker (labelled + tainted like a real hardware pool). Kubernetes 1.36 is
+# the first release with user namespaces GA; the image is pinned by digest from
+# the kind v0.33.0 release notes.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: devspaces
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+  - role: worker
+    image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+    labels:
+      devspaces.io/pool: standard
+  - role: worker
+    image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+    labels:
+      devspaces.io/lab: "true"
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          taints:
+            - key: devspaces.io/lab
+              value: "true"
+              effect: NoSchedule

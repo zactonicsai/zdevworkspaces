@@ -1,0 +1,53 @@
+<!--
+  Inbound policy for the Workspaces API in Azure API Management (applied by 50-apim.sh).
+  1. validate-azure-ad-token: the caller's bearer token must come from our tenant, be issued for
+     api://devspaces (the API app registration) and, if a group is configured, carry it in `groups`.
+  2. rate-limit-by-key: 300 calls / minute per user (the `oid` claim), so one runaway script cannot
+     flood the portal. 3. Forward the ORIGINAL Authorization header to the portal, which validates
+     the same token again (-oidc-issuer/-oidc-audience) and impersonates the user to Kubernetes.
+  Named values {{devspaces-tenant-id}} {{devspaces-audience}} {{devspaces-required-group}} come from the Bicep.
+-->
+<policies>
+  <inbound>
+    <base />
+    <validate-azure-ad-token tenant-id="{{devspaces-tenant-id}}" header-name="Authorization"
+        failed-validation-httpcode="401" failed-validation-error-message="Sign in with: wsctl login (bearer token for api://devspaces required)"
+        output-token-variable-name="jwt">
+      <audiences>
+        <audience>{{devspaces-audience}}</audience>
+      </audiences>
+      <required-claims>
+        <claim name="scp" match="any">
+          <value>Workspaces.ReadWrite</value>
+        </claim>
+      </required-claims>
+    </validate-azure-ad-token>
+    <choose>
+      <when condition="@(&quot;{{devspaces-required-group}}&quot; != &quot;none&quot; &amp;&amp; !((Jwt)context.Variables[&quot;jwt&quot;]).Claims.GetValueOrDefault(&quot;groups&quot;, &quot;&quot;).Contains(&quot;{{devspaces-required-group}}&quot;))">
+        <return-response>
+          <set-status code="403" reason="Forbidden" />
+          <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+          <set-body>{"error":"you are not a member of the developers group"}</set-body>
+        </return-response>
+      </when>
+    </choose>
+    <rate-limit-by-key calls="300" renewal-period="60"
+        counter-key="@(((Jwt)context.Variables[&quot;jwt&quot;]).Claims.GetValueOrDefault(&quot;oid&quot;, context.Request.IpAddress))"
+        increment-condition="@(context.Response == null || context.Response.StatusCode &lt; 500)" />
+    <!-- APIM strips nothing: the portal receives Authorization: Bearer <same token> and X-Forwarded-For -->
+    <set-header name="X-Forwarded-For" exists-action="override"><value>@(context.Request.IpAddress)</value></set-header>
+    <set-header name="X-Requested-With" exists-action="skip"><value>devspaces-portal</value></set-header>
+    <set-backend-service backend-id="devspaces-portal" />
+  </inbound>
+  <backend>
+    <forward-request timeout="120" />
+  </backend>
+  <outbound>
+    <base />
+    <set-header name="X-Powered-By" exists-action="delete" />
+    <set-header name="X-AspNet-Version" exists-action="delete" />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

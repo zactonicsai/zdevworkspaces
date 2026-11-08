@@ -1,0 +1,175 @@
+# The portal runs as a ServiceAccount whose only cluster power is to
+# *impersonate* developers. Every API call it makes carries
+# "Impersonate-User: <developer>", so RBAC is evaluated for the developer, not
+# for the portal — the portal can never do more than kubectl would let that
+# person do. Identity comes from the authenticating proxy in front of it.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: workspace-portal
+  namespace: devspaces-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workspace-portal-impersonator
+rules:
+  - apiGroups: [""]
+    resources: ["users", "groups"]
+    verbs: ["impersonate"]
+  # readiness probe only
+  - nonResourceURLs: ["/version"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: workspace-portal-impersonator
+subjects:
+  - kind: ServiceAccount
+    name: workspace-portal
+    namespace: devspaces-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workspace-portal-impersonator
+---
+# Sharing is the one thing the portal does with its *own* identity instead of the developer's:
+# a developer cannot read a teammate's profile key or write into the teammate's namespace, and
+# that is exactly what "share this workspace / drive with bob" needs. The portal checks that the
+# caller owns the resource, then uses this narrowly scoped role. Everything it may create is
+# name-prefixed (share-*, workspace-guest-*, peer-*, shared-*) so it can never touch anything else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workspace-portal-sharing
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["workspace-profile"]          # the guest's public keys
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]                        # ws-<name>-ssh of the OWNER (authorized_keys); the
+    verbs: ["get", "patch"]                       # owner check happens first, via impersonation
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]   # share-* / workspace-guest-* only (admission policy below)
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "delete"]    # peer-* for links the owner accepts on behalf of a guest
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "create", "delete"]    # shared-* static PVs pointing at an RWX volume
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "delete"]    # shared-<owner>-<name> in the guest namespace
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]                        # project membership, guest namespace lookup
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: workspace-portal-sharing
+subjects:
+  - kind: ServiceAccount
+    name: workspace-portal
+    namespace: devspaces-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workspace-portal-sharing
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: workspace-portal-artifactory
+  namespace: devspaces-system
+type: Opaque
+stringData:
+  # Read-only token used only to LIST images and check tool downloads for the
+  # Tools page. Developers' own tokens (Profile page) live in their namespaces.
+  token: "replace-me-or-leave-empty"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workspace-portal
+  namespace: devspaces-system
+  labels: { app.kubernetes.io/name: workspace-portal }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app.kubernetes.io/name: workspace-portal }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: workspace-portal }
+    spec:
+      serviceAccountName: workspace-portal
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: portal
+          image: ghcr.io/example/devspaces/workspace-portal:2026.10
+          args:
+            - -addr=:8080
+            # identity headers set by oauth2-proxy (see ingress-oauth2-proxy.yaml)
+            - -user-header=X-Forwarded-Email
+            - -groups-header=X-Forwarded-Groups
+            # only the ingress/proxy pods may assert identity; tighten to your proxy's pod CIDR
+            - -trusted-proxies=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+            # developers in this group see the hardware/kernel profiles (optional)
+            # - -lab-group=devspaces:lab-users
+          env:
+            - name: ARTIFACTORY_TOKEN
+              valueFrom:
+                secretKeyRef: { name: workspace-portal-artifactory, key: token, optional: true }
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: workspace-portal
+  namespace: devspaces-system
+spec:
+  selector: { app.kubernetes.io/name: workspace-portal }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# Nobody but the auth proxy may reach the portal pods: an identity header from
+# any other source would be trusted otherwise.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workspace-portal-ingress
+  namespace: devspaces-system
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: workspace-portal }
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: oauth2-proxy }
+      ports:
+        - { port: 8080, protocol: TCP }
