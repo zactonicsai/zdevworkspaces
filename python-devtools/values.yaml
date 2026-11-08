@@ -1,0 +1,30 @@
+# Number of Python devtool pods to run (increase to add more pods)
+replicaCount: 1
+
+image:
+  repository: python
+  tag: "3.12-slim"
+  pullPolicy: IfNotPresent
+
+# Python devtools installed at pod startup (or pre-baked into a custom image)
+devtools:
+  packages:
+    - ipython
+    - pytest
+    - ruff
+    - black
+    - mypy
+    - debugpy
+
+service:
+  type: ClusterIP
+  port: 8000
+  debugPort: 5678
+
+resources:
+  requests:
+    cpu: "250m"
+    memory: "512Mi"
+  limits:
+    cpu: "1000m"
+    memory: "1Gi"

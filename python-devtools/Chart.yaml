@@ -1,0 +1,6 @@
+apiVersion: v2
+name: python-devtools
+description: A Helm chart for deploying scalable Python developer pods with devtools
+type: application
+version: 0.1.0
+appVersion: "3.12"
